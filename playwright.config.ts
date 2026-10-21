@@ -76,6 +76,7 @@ const projectServers = {
       "**/app-router/nextjs-compat/prefetch-redirect.spec.ts",
       "**/app-router/nextjs-compat/route-handler-draft-cache.spec.ts",
       "**/app-router/nextjs-compat/segment-cache-client-params.spec.ts",
+      "**/app-router/nextjs-compat/segment-cache-revalidation.spec.ts",
       "**/app-router/isr.spec.ts",
     ],
     use: { baseURL: "http://localhost:4174" },
@@ -124,6 +125,7 @@ const projectServers = {
       "prefetch-redirect.spec.ts",
       "route-handler-draft-cache.spec.ts",
       "segment-cache-client-params.spec.ts",
+      "segment-cache-revalidation.spec.ts",
     ],
     use: { baseURL: "http://localhost:4191" },
     server: {

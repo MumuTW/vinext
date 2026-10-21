@@ -71,7 +71,11 @@ import {
 import { getCurrentRoutePathnameForWarning } from "./internal/route-pattern-for-warning.js";
 import { normalizeRouterHref, resolvePagesRouterHref } from "./internal/normalize-router-href.js";
 import { formatUrlObject, formatUrlObjectWithValidation } from "./internal/format-url-object.js";
-import { scheduleAppPrefetchFetch } from "./internal/app-prefetch-fetch-queue.js";
+import {
+  markGatedAppPrefetchFetch,
+  scheduleAppPrefetchFetch,
+  waitForAppPrefetchRevalidationCooldown,
+} from "./internal/app-prefetch-fetch-queue.js";
 
 type NavigateEvent = {
   url: URL;
@@ -573,6 +577,7 @@ function prefetchUrl(
             probeHeaders.set(VINEXT_MOUNTED_SLOTS_HEADER, mountedSlotsHeader);
           }
           const probeRscUrl = await createRscRequestUrl(fullHref, probeHeaders);
+          await waitForAppPrefetchRevalidationCooldown();
           return fetch(probeRscUrl, {
             method: "HEAD",
             headers: probeHeaders,
@@ -629,32 +634,34 @@ function prefetchUrl(
           autoPrefetch.prefetchShellFirst;
         const fetchPromise =
           autoPrefetch.cacheForNavigation && (gateViaRouteTree || gateViaLoadingShell)
-            ? (async () => {
-                if (gateViaLoadingShell) {
-                  await fetchLoadingShellForReuse();
-                  return fetchFullRscPayload();
-                }
-                return fetchRouteTreeGatedPrefetch({
-                  fetchFullRscPayload,
-                  fetchRouteTree: (routeTreeRscUrl, routeTreeHeaders) =>
-                    scheduleAppPrefetchFetch(
-                      (signal) =>
-                        fetch(routeTreeRscUrl, {
-                          headers: routeTreeHeaders,
-                          credentials: "include",
-                          priority,
-                          signal,
-                          // @ts-expect-error — purpose is a valid fetch option in some browsers
-                          purpose: "prefetch",
-                        }),
-                      priority,
-                    ),
-                  fullHref,
-                  headers,
-                  interceptionContext,
-                  mountedSlotsHeader,
-                });
-              })()
+            ? markGatedAppPrefetchFetch(
+                (async () => {
+                  if (gateViaLoadingShell) {
+                    await fetchLoadingShellForReuse();
+                    return fetchFullRscPayload();
+                  }
+                  return fetchRouteTreeGatedPrefetch({
+                    fetchFullRscPayload,
+                    fetchRouteTree: (routeTreeRscUrl, routeTreeHeaders) =>
+                      scheduleAppPrefetchFetch(
+                        (signal) =>
+                          fetch(routeTreeRscUrl, {
+                            headers: routeTreeHeaders,
+                            credentials: "include",
+                            priority,
+                            signal,
+                            // @ts-expect-error — purpose is a valid fetch option in some browsers
+                            purpose: "prefetch",
+                          }),
+                        priority,
+                      ),
+                    fullHref,
+                    headers,
+                    interceptionContext,
+                    mountedSlotsHeader,
+                  });
+                })(),
+              )
             : fetchFullRscPayload();
         if (
           !__prefetchInlining &&
