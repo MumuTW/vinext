@@ -691,6 +691,8 @@ export function hasPrefetchCacheEntryForNavigation(
     additionalRscUrls?: readonly string[];
     notifyInvalidation?: boolean;
     onInvalidate?: () => void;
+    /** Called with the matched entry when it is reused. */
+    onReuse?: (entry: PrefetchCacheEntry) => void;
   } = {},
 ): boolean {
   const match = findPrefetchCacheEntryForNavigation(
@@ -711,6 +713,7 @@ export function hasPrefetchCacheEntryForNavigation(
     // cache key — the match may be a normalized `_rsc` variant or an alias, so
     // an exact-key lookup after this call could silently miss it.
     attachPrefetchInvalidationToEntry(match.cacheKey, match.entry, options.onInvalidate);
+    options.onReuse?.(match.entry);
     return true;
   }
 
