@@ -34,12 +34,14 @@ import {
 import { useMergedRef } from "./use-merged-ref.js";
 import {
   getMountedSlotsHeader,
+  getPrefetchCache,
   getPrefetchInterceptionContext,
   getPrefetchedUrls,
   hasPrefetchCacheEntryForNavigation,
   navigateClientSide,
   prefetchRscResponse,
 } from "./navigation.js";
+import { claimAppPrefetchFetch } from "./internal/app-prefetch-fetch-queue.js";
 import { assertSafeNavigationUrl } from "./url-safety.js";
 import { withBasePath } from "./url-utils.js";
 import { createRscRequestHeaders, createRscRequestUrl } from "../server/app-rsc-cache-busting.js";
@@ -350,11 +352,24 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
               const cacheKey = AppElementsWire.encodeCacheKey(rscUrl, interceptionContext);
               // Dedup: skip if already in-flight or a fresh cache entry exists,
               // matching the gate link.tsx applies to avoid double-fetching a
-              // payload that a nearby <Link> already prefetched.
+              // payload that a nearby <Link> already prefetched. This Form only
+              // prefetches once, so it claims a reused request that is still
+              // queued: the Link that queued it drops it on leaving the viewport.
+              const isMounted = () => node.isConnected;
               const prefetched = getPrefetchedUrls();
-              if (prefetched.has(cacheKey)) return;
+              if (prefetched.has(cacheKey)) {
+                claimAppPrefetchFetch(getPrefetchCache().get(cacheKey)?.fetchPromise, isMounted);
+                return;
+              }
               if (
-                hasPrefetchCacheEntryForNavigation(rscUrl, interceptionContext, mountedSlotsHeader)
+                hasPrefetchCacheEntryForNavigation(
+                  rscUrl,
+                  interceptionContext,
+                  mountedSlotsHeader,
+                  {
+                    onReuse: (entry) => claimAppPrefetchFetch(entry.fetchPromise, isMounted),
+                  },
+                )
               )
                 return;
               prefetched.add(cacheKey);

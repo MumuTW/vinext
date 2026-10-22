@@ -1,5 +1,6 @@
+// Target 9 is the `?form` destination.
 export function generateStaticParams() {
-  return Array.from({ length: 8 }, (_, index) => ({ id: String(index + 1) }));
+  return Array.from({ length: 9 }, (_, index) => ({ id: String(index + 1) }));
 }
 
 export default async function PrefetchQueueTargetPage({

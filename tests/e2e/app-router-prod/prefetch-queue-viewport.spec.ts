@@ -202,3 +202,55 @@ test("re-prefetches with the current page after a persistent Link leaves and ret
     await page.unrouteAll({ behavior: "wait" });
   }
 });
+
+// A Form prefetches its destination once, when it enters the viewport, reusing
+// a Link's pending request for the same route. That request is still sent after
+// the Link leaves, while the Form is mounted.
+test("sends a queued Link prefetch that a visible Form reused after the Link leaves", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
+  const prefetches = await holdPrefetchSlots(page);
+
+  try {
+    await page.goto("/prefetch-queue-viewport?form");
+    await waitForAppRouterHydration(page);
+    await waitForQueuedPrefetches(page, prefetches.heldTargets);
+    expect(prefetches.heldTargets.has("9")).toBe(false);
+    // Reusing a cache entry moves it to the end of the cache. Move another
+    // entry there first, so the Form's reuse is observable.
+    const lastPrefetchCacheKey = () =>
+      page.evaluate(() => {
+        const cache = (window as unknown as { __VINEXT_RSC_PREFETCH_CACHE__: Map<string, unknown> })
+          .__VINEXT_RSC_PREFETCH_CACHE__;
+        return [...cache.keys()].at(-1);
+      });
+    await page.evaluate(() => {
+      const cache = (window as unknown as { __VINEXT_RSC_PREFETCH_CACHE__: Map<string, unknown> })
+        .__VINEXT_RSC_PREFETCH_CACHE__;
+      const key = [...cache.keys()].find((cacheKey) => !cacheKey.includes("/9"));
+      if (key === undefined) return;
+      const entry = cache.get(key);
+      cache.delete(key);
+      cache.set(key, entry);
+    });
+    expect(await lastPrefetchCacheKey()).not.toContain("/prefetch-queue-viewport/9");
+
+    // Bring the Form into range while the Link is still visible, and wait for
+    // it to reuse the Link's queued request.
+    await page.setViewportSize({ width: 1280, height: 2400 });
+    await expect.poll(lastPrefetchCacheKey).toContain("/prefetch-queue-viewport/9");
+
+    await page.setViewportSize({ width: 1280, height: 600 });
+    await page.locator("#queue-form").scrollIntoViewIfNeeded();
+    await waitForLinksIntersecting(page, "#form-link", false);
+    const requestedBefore = prefetches.requestedTargets.length;
+    prefetches.releaseHeld();
+    await waitForQueuedPrefetchesToSettle(page);
+
+    expect(prefetches.requestedTargets.slice(requestedBefore)).toContain("9");
+  } finally {
+    prefetches.releaseHeld();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});

@@ -167,23 +167,14 @@ export function cancelAppPrefetchFetch(promise: Promise<Response> | undefined): 
  *
  * No-op when the request has already started or was never queued.
  *
- * Also records a claim, live while `isCurrent` returns true, until the returned
- * function releases it; see `isAppPrefetchFetchClaimed`.
+ * Also claims the request; see `claimAppPrefetchFetch`.
  */
 export function promoteAppPrefetchFetch(
   promise: Promise<Response> | undefined,
   isCurrent: () => boolean = () => true,
 ): () => void {
-  if (promise === undefined) return () => {};
-  let claims = appPrefetchFetchClaims.get(promise);
-  if (claims === undefined) {
-    claims = new Set();
-    appPrefetchFetchClaims.set(promise, claims);
-  }
-  claims.add(isCurrent);
-  const release = () => {
-    claims.delete(isCurrent);
-  };
+  const release = claimAppPrefetchFetch(promise, isCurrent);
+  if (promise === undefined) return release;
 
   const control = appPrefetchFetchControls.get(promise);
   const runner = control?.runner;
@@ -199,10 +190,31 @@ export function promoteAppPrefetchFetch(
 }
 
 /**
- * Whether a current navigation is waiting on this prefetch. A staged prefetch
- * (route tree, then payload) hands navigation a promise that wraps its queued
- * requests, so promotion cannot reach them; they check this instead before
- * dropping themselves.
+ * Record that a consumer other than the Links behind this prefetch needs it, so
+ * it is not dropped when they leave. The claim is live while `isCurrent`
+ * returns true, until the returned function releases it.
+ */
+export function claimAppPrefetchFetch(
+  promise: Promise<Response> | undefined,
+  isCurrent: () => boolean,
+): () => void {
+  if (promise === undefined) return () => {};
+  let claims = appPrefetchFetchClaims.get(promise);
+  if (claims === undefined) {
+    claims = new Set();
+    appPrefetchFetchClaims.set(promise, claims);
+  }
+  claims.add(isCurrent);
+  return () => {
+    claims.delete(isCurrent);
+  };
+}
+
+/**
+ * Whether a current navigation, or a mounted Form that reused it, needs this
+ * prefetch. A staged prefetch (route tree, then payload) hands navigation a
+ * promise that wraps its queued requests, so promotion cannot reach them; they
+ * check this instead before dropping themselves.
  */
 export function isAppPrefetchFetchClaimed(promise: Promise<Response> | undefined): boolean {
   const claims = promise && appPrefetchFetchClaims.get(promise);
