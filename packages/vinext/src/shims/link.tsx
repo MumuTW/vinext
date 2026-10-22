@@ -178,9 +178,14 @@ export function useLinkStatus(): LinkStatusContextValue {
 }
 
 let linkPrefetchNavigationEpoch = 0;
+// Unlike asynchronous setup, already queued requests survive status-only
+// resets (raw history writes and hash changes). Route navigations invalidate
+// them before they can fetch with cookies changed by the destination's click.
+let linkPrefetchFetchEpoch = 0;
 
-function notifyLinkNavigationStartAndCancelPrefetchSetup(): void {
+function notifyLinkNavigationStartAndCancelPrefetchSetup(cancelQueuedPrefetch = false): void {
   linkPrefetchNavigationEpoch += 1;
+  if (cancelQueuedPrefetch) linkPrefetchFetchEpoch += 1;
   notifyLinkNavigationStart();
 }
 
@@ -309,6 +314,8 @@ function prefetchUrl(
 ): void {
   if (typeof window === "undefined") return;
   const navigationEpoch = linkPrefetchNavigationEpoch;
+  const fetchEpoch = linkPrefetchFetchEpoch;
+  const isCurrentPrefetch = () => fetchEpoch === linkPrefetchFetchEpoch;
 
   const prefetchHref = getLinkPrefetchHref({
     href,
@@ -516,6 +523,7 @@ function prefetchUrl(
                 purpose: "prefetch",
               }),
             priority,
+            isCurrentPrefetch,
           );
         const fetchLoadingShellForReuse = async (): Promise<void> => {
           const shellHeaders = createAppPrefetchRequestHeaders({
@@ -547,6 +555,7 @@ function prefetchUrl(
                     purpose: "prefetch",
                   }),
                 priority,
+                isCurrentPrefetch,
               ),
               interceptionContext,
               mountedSlotsHeader,
@@ -573,6 +582,9 @@ function prefetchUrl(
             probeHeaders.set(VINEXT_MOUNTED_SLOTS_HEADER, mountedSlotsHeader);
           }
           const probeRscUrl = await createRscRequestUrl(fullHref, probeHeaders);
+          if (!isCurrentPrefetch()) {
+            throw new DOMException("Prefetch superseded by navigation", "AbortError");
+          }
           return fetch(probeRscUrl, {
             method: "HEAD",
             headers: probeHeaders,
@@ -648,6 +660,7 @@ function prefetchUrl(
                           purpose: "prefetch",
                         }),
                       priority,
+                      isCurrentPrefetch,
                     ),
                   fullHref,
                   headers,

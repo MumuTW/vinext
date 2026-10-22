@@ -1915,7 +1915,7 @@ function registerServerActionCallback(): void {
             // link's pending indicator when this action still owns navigation;
             // a stale action must not clear a newer link's pending state.
             if (browserNavigationController.isCurrentNavigation(actionInitiation.navigationId)) {
-              getNavigationRuntime()?.functions.notifyLinkNavigationStart?.();
+              getNavigationRuntime()?.functions.notifyLinkNavigationStart?.(true);
             }
             const hashIdx = target.href.indexOf("#");
             const hash = hashIdx !== -1 ? target.href.slice(hashIdx) : "";

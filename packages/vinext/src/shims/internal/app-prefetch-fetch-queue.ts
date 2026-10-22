@@ -6,7 +6,7 @@ const MAX_DEFAULT_APP_PREFETCH_REQUESTS = 4;
 const defaultAppPrefetchQueue: Array<() => void> = [];
 type AppPrefetchFetchControl = {
   cancel: () => void;
-  runner?: () => void;
+  runner?: (promoted?: boolean) => void;
 };
 /** Lets a consumer promote or cancel the request behind a promise it already holds. */
 const appPrefetchFetchControls = new WeakMap<Promise<Response>, AppPrefetchFetchControl>();
@@ -45,13 +45,20 @@ export function releaseAppPrefetchFetchSlot(response: Response): void {
  * Low-priority App Router prefetches share a small request queue. The consumer
  * must either snapshot the returned Response with snapshotRscResponse() or call
  * releaseAppPrefetchFetchSlot() when it drops the response without consuming it.
+ * `isCurrent` is checked when a background request actually starts, including
+ * later stages of a prefetch. Navigation promotion explicitly claims a queued
+ * request and bypasses this check.
  */
 export function scheduleAppPrefetchFetch(
   fetcher: (signal: AbortSignal) => Promise<Response>,
   priority: "low" | "high",
+  isCurrent?: () => boolean,
 ): Promise<Response> {
   const controller = new AbortController();
   if (priority === "high") {
+    if (isCurrent?.() === false) {
+      return Promise.reject(new DOMException("Prefetch superseded by navigation", "AbortError"));
+    }
     const promise = fetcher(controller.signal);
     const control = { cancel: () => controller.abort() };
     appPrefetchFetchControls.set(promise, control);
@@ -69,12 +76,12 @@ export function scheduleAppPrefetchFetch(
     return promise;
   }
 
-  let runner!: () => void;
+  let runner!: (promoted?: boolean) => void;
   let rejectPromise!: (reason?: unknown) => void;
   let started = false;
   const promise = new Promise<Response>((resolve, reject) => {
     rejectPromise = reject;
-    runner = () => {
+    runner = (promoted = false) => {
       started = true;
       let didRelease = false;
       const release = () => {
@@ -86,6 +93,13 @@ export function scheduleAppPrefetchFetch(
       };
 
       try {
+        // A queued Link request may outlive its page. Check immediately before
+        // fetch reads cookies; ignoring the response is too late for Set-Cookie.
+        // A navigation that explicitly claims this request is still allowed to
+        // start its destination, even after the background generation changes.
+        if (!promoted && isCurrent?.() === false) {
+          throw new DOMException("Prefetch superseded by navigation", "AbortError");
+        }
         fetcher(controller.signal).then(
           (response) => {
             (response as Response & Record<symbol, (() => void) | undefined>)[
@@ -156,5 +170,5 @@ export function promoteAppPrefetchFetch(promise: Promise<Response> | undefined):
   defaultAppPrefetchQueue.splice(index, 1);
 
   activeDefaultAppPrefetchRequests += 1;
-  runner();
+  runner(true);
 }

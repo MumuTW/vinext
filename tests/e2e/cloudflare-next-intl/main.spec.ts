@@ -279,12 +279,6 @@ it('can use `Link` to link to the root of another language', async ({page}) => {
   await expect(link).toHaveAttribute('href', '/de');
   await link.click();
   await expect(page).toHaveURL('/de');
-  // vinext: let the `/de` page's Link prefetches settle first. next-intl's
-  // middleware syncs `NEXT_LOCALE` on every request, so a `/de/*` prefetch
-  // still in flight after the switch resets the cookie to `de` and races the
-  // redirect to `/`. Real Next.js has the same race (it shows up with ~20ms of
-  // added latency); it just usually wins on Node's faster responses.
-  await page.waitForLoadState('networkidle');
   await page.getByRole('link', {name: 'Zu Englisch wechseln'}).click();
   await expect(page).toHaveURL('/');
 });
@@ -341,6 +335,117 @@ it('keeps the locale cookie updated when changing the locale and uses soft navig
   // Currently, a root layout outside of the `[locale]`
   // folder is required for this to work.
   expect(tracker.numPageLoads).toBe(1);
+});
+
+it('does not let queued prefetches reset the locale cookie during a locale switch', async ({
+  context,
+  page
+}) => {
+  const tracker = getPageLoadTracker(context, '/de');
+  const englishTracker = getPageLoadTracker(context, '/');
+  await page.setViewportSize({width: 1280, height: 2400});
+
+  function createGate() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((release) => { resolve = release; });
+    return {promise, resolve};
+  }
+  const slotsReady = createGate();
+  const releasePrefetches = createGate();
+  const navigationReady = createGate();
+  const releaseNavigation = createGate();
+  let heldPrefetches = 0;
+  let readyPrefetches = 0;
+
+  await page.route('**/*', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const isRsc = url.searchParams.has('_rsc');
+    const isPrefetch = request.headers()['next-router-prefetch'] === '1';
+
+    if (isRsc && isPrefetch && heldPrefetches < 4) {
+      heldPrefetches++;
+      // Fetch while NEXT_LOCALE is still de, but hold the bodies so the four
+      // active prefetch slots cannot release the queued German links yet.
+      const response = await route.fetch({maxRedirects: 0});
+      expect(response.headers()['set-cookie'] || '').not.toContain('NEXT_LOCALE=');
+      readyPrefetches++;
+      if (readyPrefetches === 4) slotsReady.resolve();
+      await releasePrefetches.promise;
+      await route.fulfill({response});
+      return;
+    }
+
+    if (isRsc && !isPrefetch && url.pathname === '/en') {
+      // Compute the redirect while the cookie is en. Delaying the request
+      // itself would let /en see de after the race and heal the stale cookie.
+      const response = await route.fetch({maxRedirects: 0});
+      expect(response.status()).toBe(307);
+      expect(response.headers().location).toBe('/');
+      expect(response.headers()['set-cookie'] || '').not.toContain('NEXT_LOCALE=');
+      navigationReady.resolve();
+      await releaseNavigation.promise;
+      await route.fulfill({response});
+      return;
+    }
+    await route.continue();
+  });
+
+  try {
+    await page.goto('/de');
+    await assertLocaleCookieValue(page, 'de');
+    await slotsReady.promise;
+
+    // Wait for a fifth Link prefetch to enter the real request queue, rather
+    // than relying on network timing. Capture only this generation's work;
+    // new links rendered after navigation are not part of this barrier.
+    await expect.poll(() => page.evaluate(() => {
+      const cache = (window as Window & {
+        __VINEXT_RSC_PREFETCH_CACHE__?: Map<string, {pending?: Promise<unknown>}>;
+      }).__VINEXT_RSC_PREFETCH_CACHE__;
+      return new Set(
+        [...(cache?.values() || [])].flatMap((entry) => entry.pending ? [entry.pending] : [])
+      ).size;
+    })).toBeGreaterThan(4);
+    await page.evaluate(() => {
+      const cache = (window as Window & {
+        __VINEXT_RSC_PREFETCH_CACHE__: Map<string, {pending?: Promise<unknown>}>;
+      }).__VINEXT_RSC_PREFETCH_CACHE__;
+      Object.assign(window, {
+        __localePrefetchBarrier: Promise.allSettled(
+          new Set(
+            [...cache.values()].flatMap((entry) => entry.pending ? [entry.pending] : [])
+          )
+        )
+      });
+    });
+
+    // Avoid hover prefetches: next-intl's real click handler writes en before
+    // requesting /en, whose redirect to / must read that same cookie.
+    await page.getByRole('link', {name: 'Zu Englisch wechseln'}).evaluate(
+      (link: HTMLAnchorElement) => link.click()
+    );
+    await navigationReady.promise;
+    await assertLocaleCookieValue(page, 'en');
+
+    releasePrefetches.resolve();
+    await page.evaluate(() => {
+      const barrier: unknown = Reflect.get(window, '__localePrefetchBarrier');
+      if (!(barrier instanceof Promise)) throw new Error('Missing prefetch barrier');
+      return barrier;
+    });
+    releaseNavigation.resolve();
+
+    await expect(page).toHaveURL('/');
+    await expect(page.getByRole('heading', {name: 'Home', exact: true})).toBeVisible();
+    await assertLocaleCookieValue(page, 'en');
+    expect(tracker.numPageLoads).toBe(1);
+    expect(englishTracker.numPageLoads).toBe(0);
+  } finally {
+    releasePrefetches.resolve();
+    releaseNavigation.resolve();
+    await page.unrouteAll({behavior: 'wait'});
+  }
 });
 
 it('can use `Link` in client components without using a provider', async ({
