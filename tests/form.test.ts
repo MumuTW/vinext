@@ -88,10 +88,10 @@ function renderClientForm(
   // `forwardRef()` exposes the wrapped render function on `.render`, which lets us
   // exercise the submit handler directly without adding a DOM renderer just for this shim.
   //
-  // Form now uses hooks (useRef, useCallback, useEffect). We patch the React 19 dispatcher
-  // (ReactSharedInternals.H) with a minimal stub so hooks resolve without error outside a
-  // real rendering pipeline. useEffect is a no-op; useRef returns a stable ref object;
-  // useCallback returns the callback unchanged.
+  // Form now uses hooks (useRef, useCallback, useLayoutEffect). We patch the React 19
+  // dispatcher (ReactSharedInternals.H) with a minimal stub so hooks resolve without error
+  // outside a real rendering pipeline. Effects are collected; useRef returns a stable ref
+  // object; useCallback returns the callback unchanged.
   const ReactSharedInternals = (React as any)
     .__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
   const previousDispatcher = ReactSharedInternals.H;
@@ -115,7 +115,9 @@ function renderClientForm(
     useMemo: (fn: () => unknown) => fn(),
     useState: (init: unknown) => [init, () => {}],
     useReducer: (_reducer: unknown, init: unknown) => [init, () => {}],
-    useLayoutEffect: () => {},
+    useLayoutEffect(effect: () => void | (() => void)) {
+      effects.push(effect);
+    },
     useImperativeHandle: () => {},
     useDebugValue: () => {},
     useDeferredValue: (val: unknown) => val,
