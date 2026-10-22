@@ -10,6 +10,8 @@ type AppPrefetchFetchControl = {
 };
 /** Lets a consumer promote or cancel the request behind a promise it already holds. */
 const appPrefetchFetchControls = new WeakMap<Promise<Response>, AppPrefetchFetchControl>();
+/** Promises a navigation tried to promote; see `isAppPrefetchFetchClaimed`. */
+const claimedAppPrefetchFetches = new WeakSet<Promise<Response>>();
 let activeDefaultAppPrefetchRequests = 0;
 let defaultAppPrefetchDrainScheduled = false;
 
@@ -159,6 +161,7 @@ export function cancelAppPrefetchFetch(promise: Promise<Response> | undefined): 
  */
 export function promoteAppPrefetchFetch(promise: Promise<Response> | undefined): void {
   if (promise === undefined) return;
+  claimedAppPrefetchFetches.add(promise);
   const control = appPrefetchFetchControls.get(promise);
   const runner = control?.runner;
   if (runner === undefined) return;
@@ -169,4 +172,14 @@ export function promoteAppPrefetchFetch(promise: Promise<Response> | undefined):
 
   activeDefaultAppPrefetchRequests += 1;
   runner(true);
+}
+
+/**
+ * Whether a navigation has claimed this prefetch. A staged prefetch (route
+ * tree, then payload) hands navigation a promise that wraps its queued
+ * requests, so promotion cannot reach them; they check this instead before
+ * dropping themselves.
+ */
+export function isAppPrefetchFetchClaimed(promise: Promise<Response> | undefined): boolean {
+  return promise !== undefined && claimedAppPrefetchFetches.has(promise);
 }

@@ -71,7 +71,10 @@ import {
 import { getCurrentRoutePathnameForWarning } from "./internal/route-pattern-for-warning.js";
 import { normalizeRouterHref, resolvePagesRouterHref } from "./internal/normalize-router-href.js";
 import { formatUrlObject, formatUrlObjectWithValidation } from "./internal/format-url-object.js";
-import { scheduleAppPrefetchFetch } from "./internal/app-prefetch-fetch-queue.js";
+import {
+  isAppPrefetchFetchClaimed,
+  scheduleAppPrefetchFetch,
+} from "./internal/app-prefetch-fetch-queue.js";
 
 type NavigateEvent = {
   url: URL;
@@ -511,7 +514,10 @@ function prefetchUrl(
           return;
         }
         const owners = owner && new Set([owner]);
-        const isWanted = owners && (() => hasVisiblePrefetchOwner(owners));
+        // Set once this request is cached; a navigation may claim it from then on.
+        let claimable: Promise<Response> | undefined;
+        const isWanted =
+          owners && (() => hasVisiblePrefetchOwner(owners) || isAppPrefetchFetchClaimed(claimable));
         const fetchFullRscPayload = () =>
           scheduleAppPrefetchFetch(
             (signal) =>
@@ -679,6 +685,7 @@ function prefetchUrl(
               })()
             : fetchFullRscPayload();
         if (owners) prefetchOwners.set(fetchPromise, owners);
+        claimable = fetchPromise;
         if (
           !__prefetchInlining &&
           mode === "full" &&
