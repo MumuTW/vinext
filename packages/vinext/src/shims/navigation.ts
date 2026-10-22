@@ -2597,8 +2597,8 @@ function hardNavigateTo(fullHref: string, mode: "push" | "replace"): void {
  * submit, or a raw history update). A <Link> click registers itself first, so
  * the hook keeps that link pending.
  */
-function resetStaleLinkStatus(cancelQueuedPrefetch = false): void {
-  getNavigationRuntime()?.functions.notifyLinkNavigationStart?.(cancelQueuedPrefetch);
+function resetStaleLinkStatus(): void {
+  getNavigationRuntime()?.functions.notifyLinkNavigationStart?.();
 }
 
 /**
@@ -2614,12 +2614,10 @@ function notifyAppNavigationStart(href: string): void {
   // fetch, so neither supersedes a pending prefetch. The hash is stripped from
   // the destination above precisely because it does not select a resource —
   // which makes checking for the same-document case here load-bearing.
-  const supersedesPrefetch =
-    destination !== null && !isHashOnlyBrowserUrlChange(href, window.location.href, __basePath);
-  if (supersedesPrefetch) {
+  if (destination !== null && !isHashOnlyBrowserUrlChange(href, window.location.href, __basePath)) {
     cancelPendingPrefetchSetups(destination);
   }
-  resetStaleLinkStatus(supersedesPrefetch);
+  resetStaleLinkStatus();
 }
 
 /**
@@ -2633,7 +2631,7 @@ function notifyAppNavigationStart(href: string): void {
 function notifyAppPopstateNavigationStart(): void {
   const destination = toAppPrefetchDestination(window.location.href);
   if (destination !== null) cancelPendingPrefetchSetups(destination);
-  resetStaleLinkStatus(destination !== null);
+  resetStaleLinkStatus();
 }
 
 /**

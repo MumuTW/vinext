@@ -87,10 +87,8 @@ export type NavigationRuntimeFunctions = {
    * is not the one driving this navigation (e.g. a programmatic router.push or
    * a shallow-routing transition). Registered by shims/link.tsx; decoupled
    * through the runtime to avoid a circular import with shims/navigation.ts.
-   * `cancelQueuedPrefetch` marks a route navigation that supersedes background
-   * Link requests; status-only resets and same-document changes leave them live.
    */
-  notifyLinkNavigationStart?: (cancelQueuedPrefetch?: boolean) => void;
+  notifyLinkNavigationStart?: () => void;
   /**
    * Re-prefetch visible links whose prefetch inputs or cache entries changed.
    * `"cache-invalidation"` marks a ping that follows a whole-cache

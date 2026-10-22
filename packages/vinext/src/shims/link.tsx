@@ -178,14 +178,9 @@ export function useLinkStatus(): LinkStatusContextValue {
 }
 
 let linkPrefetchNavigationEpoch = 0;
-// Unlike asynchronous setup, already queued requests survive status-only
-// resets (raw history writes and hash changes). Route navigations invalidate
-// them before they can fetch with cookies changed by the destination's click.
-let linkPrefetchFetchEpoch = 0;
 
-function notifyLinkNavigationStartAndCancelPrefetchSetup(cancelQueuedPrefetch = false): void {
+function notifyLinkNavigationStartAndCancelPrefetchSetup(): void {
   linkPrefetchNavigationEpoch += 1;
-  if (cancelQueuedPrefetch) linkPrefetchFetchEpoch += 1;
   notifyLinkNavigationStart();
 }
 
@@ -303,6 +298,10 @@ function getLinkPrefetchRouterMode(): LinkPrefetchRouterMode {
  *
  * `afterInvalidation` marks a re-prefetch that follows a whole-cache
  * invalidation; see `invalidationPrefetch`.
+ *
+ * `fromVisibleLink` marks a viewport prefetch. Its queued requests are dropped
+ * if no visible Link points at `href` by the time they would start; see
+ * `hasVisibleAppLinkPrefetch`.
  */
 function prefetchUrl(
   href: string,
@@ -311,11 +310,11 @@ function prefetchUrl(
   pagesRouteHref?: string,
   locale?: string | false,
   afterInvalidation = false,
+  fromVisibleLink = false,
 ): void {
   if (typeof window === "undefined") return;
   const navigationEpoch = linkPrefetchNavigationEpoch;
-  const fetchEpoch = linkPrefetchFetchEpoch;
-  const isCurrentPrefetch = () => fetchEpoch === linkPrefetchFetchEpoch;
+  const isWanted = fromVisibleLink ? () => hasVisibleAppLinkPrefetch(href) : undefined;
 
   const prefetchHref = getLinkPrefetchHref({
     href,
@@ -523,7 +522,7 @@ function prefetchUrl(
                 purpose: "prefetch",
               }),
             priority,
-            isCurrentPrefetch,
+            isWanted,
           );
         const fetchLoadingShellForReuse = async (): Promise<void> => {
           const shellHeaders = createAppPrefetchRequestHeaders({
@@ -555,7 +554,7 @@ function prefetchUrl(
                     purpose: "prefetch",
                   }),
                 priority,
-                isCurrentPrefetch,
+                isWanted,
               ),
               interceptionContext,
               mountedSlotsHeader,
@@ -582,9 +581,6 @@ function prefetchUrl(
             probeHeaders.set(VINEXT_MOUNTED_SLOTS_HEADER, mountedSlotsHeader);
           }
           const probeRscUrl = await createRscRequestUrl(fullHref, probeHeaders);
-          if (!isCurrentPrefetch()) {
-            throw new DOMException("Prefetch superseded by navigation", "AbortError");
-          }
           return fetch(probeRscUrl, {
             method: "HEAD",
             headers: probeHeaders,
@@ -660,7 +656,7 @@ function prefetchUrl(
                           purpose: "prefetch",
                         }),
                       priority,
-                      isCurrentPrefetch,
+                      isWanted,
                     ),
                   fullHref,
                   headers,
@@ -811,6 +807,22 @@ const visibleLinkPrefetches = new Set<LinkPrefetchInstance>();
 const visibleAppPrefetchQueue: LinkPrefetchInstance[] = [];
 let visibleAppPrefetchDrainScheduled = false;
 
+/**
+ * Next.js cancels a Link's prefetch task when the Link leaves the viewport or
+ * unmounts (`cancelPrefetchTask` in `client/components/links.ts`): requests it
+ * has not started are never sent, while requests already in flight finish.
+ * Vinext queues the requests themselves, so a queued viewport prefetch checks
+ * this when its turn comes. Otherwise a prefetch queued by the previous page
+ * could still reach middleware after the user navigated away (for example
+ * resetting a locale cookie the destination page just set).
+ */
+function hasVisibleAppLinkPrefetch(href: string): boolean {
+  for (const instance of visibleLinkPrefetches) {
+    if (instance.href === href && instance.routerMode === "app") return true;
+  }
+  return false;
+}
+
 function drainVisibleAppPrefetchQueue(): void {
   visibleAppPrefetchDrainScheduled = false;
   while (true) {
@@ -827,6 +839,7 @@ function drainVisibleAppPrefetchQueue(): void {
       instance.pagesRouteHref,
       undefined,
       afterInvalidation,
+      true,
     );
   }
 }
