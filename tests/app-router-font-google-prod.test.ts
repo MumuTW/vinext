@@ -38,6 +38,12 @@ describe("App Router Production server self-hosted next/font/google headers", ()
   // https://github.com/vercel/next.js/blob/98a73ead5bf711183e07398983c5c943f86328e7/test/e2e/app-dir/next-font-extensionless/google-font-mocked-responses.js
   const extensionlessFontUrl = "https://fonts.gstatic.com/l/font?kit=a%2Bb%25c=d&skey=test&v=v20";
   const fontDownloads: string[] = [];
+  // Google only serves WOFF2 to the Chrome user agent vinext fetches with,
+  // but the format hint decides the extension for the other types too.
+  const extensionlessFontFormats = [
+    ["opentype", "otf"],
+    ["embedded-opentype", "eot"],
+  ] as const;
   const mockFontBytes = (url: string) =>
     new Uint8Array([0x77, 0x4f, 0x46, 0x32, ...new TextEncoder().encode(url)]);
 
@@ -102,6 +108,15 @@ describe("App Router Production server self-hosted next/font/google headers", ()
           `  src: url(${gstaticUrl}) format('woff2');`,
           "  unicode-range: U+0000-00FF;",
           "}",
+          ...(isMono
+            ? []
+            : extensionlessFontFormats.flatMap(([format, ext]) => [
+                "@font-face {",
+                `  font-family: '${family}';`,
+                "  font-weight: 400;",
+                `  src: url(https://fonts.gstatic.com/l/font?kit=geist-${ext}&v=1) format('${format}');`,
+                "}",
+              ])),
         ].join("\n");
         return new Response(css, {
           status: 200,
@@ -226,7 +241,13 @@ describe("App Router Production server self-hosted next/font/google headers", ()
       const fontRes = await fetch(`${fontBaseUrl}${href}`);
       expect(fontRes.status, href).toBe(200);
       expect(fontRes.headers.get("content-type")).toBe(
-        href === localFontHref ? "font/ttf" : "font/woff2",
+        href === localFontHref
+          ? "font/ttf"
+          : href.endsWith(".otf")
+            ? "font/otf"
+            : href.endsWith(".eot")
+              ? "application/vnd.ms-fontobject"
+              : "font/woff2",
       );
       expect(fontRes.headers.get("cache-control")).toContain("immutable");
     }
@@ -268,6 +289,25 @@ describe("App Router Production server self-hosted next/font/google headers", ()
     expect(new Uint8Array(await fontRes.arrayBuffer())).toEqual(
       mockFontBytes(extensionlessFontUrl),
     );
+  });
+
+  it("names other extensionless formats from their hint and preloads them as font/${ext}", async () => {
+    // Next.js preloads every font file as `font/${ext}`, including
+    // `font/eot`, while its static server sends the registered MIME type.
+    const res = await fetch(`${fontBaseUrl}/`);
+    const link = res.headers.get("link");
+    const html = await res.text();
+    for (const [, ext] of extensionlessFontFormats) {
+      expect(fontDownloads).toContain(`https://fonts.gstatic.com/l/font?kit=geist-${ext}&v=1`);
+      const preload = html.match(
+        new RegExp(
+          `<link rel="preload"[^>]*href="(/_next/static/_vinext_fonts/geist-[^"]+\\.${ext})"[^>]*>`,
+        ),
+      );
+      expect(preload, ext).not.toBeNull();
+      expect(preload![0]).toContain(`type="font/${ext}"`);
+      expect(link).toContain(`<${preload![1]}>; rel=preload; as=font; type=font/${ext}`);
+    }
   });
 
   it("emits served URLs in the injected <style data-vinext-fonts> block", async () => {
