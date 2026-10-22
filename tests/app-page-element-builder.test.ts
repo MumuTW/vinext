@@ -1229,6 +1229,50 @@ describe("buildPageElements", () => {
     });
   });
 
+  it("suspends a sibling intercepting page under its intercepting loading UI", async () => {
+    // The page is invoked ahead of its intercepting layouts, but a use()
+    // suspension still shows the loading.tsx inside them.
+    const pageData = new Promise<string>(() => {});
+    function InterceptPage(): React.ReactNode {
+      return React.createElement("p", null, React.use(pageData));
+    }
+    function InterceptLayout(props: Record<string, unknown>): React.ReactNode {
+      return React.createElement("aside", null, props.children as React.ReactNode);
+    }
+    function InterceptLoading(): React.ReactNode {
+      return React.createElement("p", null, "intercept loading");
+    }
+    const result = await buildPageElements(
+      createBaseOptions({
+        route: createSyntheticRoute({
+          page: createSyntheticPageModule(() => null),
+          routeSegments: ["feed"],
+          pattern: "/feed",
+        }),
+        routePath: "/feed/photo/1",
+        opts: {
+          interceptBranchSegments: ["(.)photo", "[id]"],
+          interceptLayouts: [createSyntheticPageModule(InterceptLayout)],
+          interceptLayoutSegments: [["(.)photo"]],
+          interceptLoadings: [createSyntheticPageModule(InterceptLoading)],
+          interceptLoadingTreePositions: [1],
+          interceptPage: createSyntheticPageModule(InterceptPage),
+          interceptParams: { id: "1" },
+          interceptSlotKey: SIBLING_PAGE_INTERCEPT_SLOT_KEY,
+          interceptSourcePageSegments: ["feed", "(.)photo", "[id]"],
+        },
+      }),
+    );
+    const pageEntry = (result as Record<string, React.ReactNode>)["page:/feed/photo/1"];
+
+    // renderToString renders the nearest Suspense fallback for a suspension.
+    const { renderToString } = await import("react-dom/server");
+    const html = renderToString(React.createElement(React.Fragment, null, pageEntry));
+
+    expect(html).toContain("<aside>");
+    expect(html).toContain("intercept loading");
+  });
+
   it("renders a sibling intercepting page before source layouts that consume its request state", async () => {
     // The intercepting page initializes request state, as with next-intl's
     // setRequestLocale(), before the source layout reads it, through an async
