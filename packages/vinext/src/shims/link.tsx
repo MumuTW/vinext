@@ -859,13 +859,16 @@ function createOwnedLinkPrefetch(
   return { owners: new Set([owner]), requests: [], dropped: false };
 }
 
-function isOwnedLinkPrefetchWanted(owned: OwnedLinkPrefetch): boolean {
-  if (isAppPrefetchFetchClaimed(owned.claimable)) return true;
-  if (owned.dropped) return false;
+function hasVisibleOwner(owned: OwnedLinkPrefetch): boolean {
   for (const owner of owned.owners) {
     if (owner.isVisible) return true;
   }
   return false;
+}
+
+function isOwnedLinkPrefetchWanted(owned: OwnedLinkPrefetch): boolean {
+  if (isAppPrefetchFetchClaimed(owned.claimable)) return true;
+  return !owned.dropped && hasVisibleOwner(owned);
 }
 
 function scheduleOwnedLinkPrefetch(
@@ -926,8 +929,10 @@ function joinOwnedLinkPrefetch(
 function releaseOwnedLinkPrefetches(instance: LinkPrefetchInstance): void {
   for (const owned of instance.ownedPrefetches) {
     owned.owners.delete(instance);
-    if (owned.dropped || isOwnedLinkPrefetchWanted(owned)) continue;
+    if (owned.dropped || hasVisibleOwner(owned)) continue;
+    // Dropped even while claimed, so the claim alone keeps it alive.
     owned.dropped = true;
+    if (isAppPrefetchFetchClaimed(owned.claimable)) continue;
     for (const request of owned.requests) cancelQueuedAppPrefetchFetch(request);
   }
   instance.ownedPrefetches.clear();
