@@ -318,6 +318,11 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
     if (!node) return;
     if (typeof IntersectionObserver === "undefined") return;
 
+    // Claims on reused prefetches last for this effect run, not for the node,
+    // which React keeps when `action` changes.
+    let active = true;
+    const isActive = () => active;
+    const releaseClaims: Array<() => void> = [];
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -355,10 +360,13 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
               // payload that a nearby <Link> already prefetched. This Form only
               // prefetches once, so it claims a reused request that is still
               // queued: the Link that queued it drops it on leaving the viewport.
-              const isMounted = () => node.isConnected;
+              const claim = (fetchPromise: Promise<Response> | undefined) => {
+                // Cleanup may have run while this callback awaited.
+                if (active) releaseClaims.push(claimAppPrefetchFetch(fetchPromise, isActive));
+              };
               const prefetched = getPrefetchedUrls();
               if (prefetched.has(cacheKey)) {
-                claimAppPrefetchFetch(getPrefetchCache().get(cacheKey)?.fetchPromise, isMounted);
+                claim(getPrefetchCache().get(cacheKey)?.fetchPromise);
                 return;
               }
               if (
@@ -367,7 +375,7 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
                   interceptionContext,
                   mountedSlotsHeader,
                   {
-                    onReuse: (entry) => claimAppPrefetchFetch(entry.fetchPromise, isMounted),
+                    onReuse: (entry) => claim(entry.fetchPromise),
                   },
                 )
               )
@@ -403,6 +411,8 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
     observer.observe(node);
     return () => {
       observer.unobserve(node);
+      active = false;
+      for (const release of releaseClaims) release();
     };
     // `actionHref` is derived purely from `action` (+ the module-constant
     // `__basePath`), so it's technically redundant alongside `action` here, but
