@@ -437,6 +437,26 @@ test.describe("Not Found", () => {
     await expect(page.locator("#slot-own-team-nf")).toHaveCount(0);
   });
 
+  test("a slot intercept below a slot segment keeps that segment's layout and not-found", async ({
+    page,
+  }) => {
+    await page.goto(`${BASE}/nextjs-compat/not-found-slot-own/team/ok/roster`);
+    await waitForAppRouterHydration(page);
+
+    await page.getByRole("link", { name: "Player missing" }).click();
+    await expect(page).toHaveURL(/\/team\/ok\/roster\/player\/missing$/);
+    await expect(
+      page.locator("#slot-own-team-slot #slot-own-roster-layout #slot-own-roster-nf"),
+    ).toBeVisible();
+    await expect(page.locator("#slot-own-team-nf")).toHaveCount(0);
+
+    await page.getByRole("link", { name: "Player ok" }).click();
+    await expect(page.locator("#slot-own-roster-layout #slot-own-roster-player")).toHaveText(
+      "Player ok",
+    );
+    await expect(page.locator("#slot-own-roster-nf")).toHaveCount(0);
+  });
+
   test("an intercepting modal's own not-found catches its notFound() inside the modal", async ({
     page,
   }) => {

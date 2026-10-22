@@ -2779,6 +2779,7 @@ function scanForInterceptingPages(
   results: InterceptingRoute[],
   matcher: ValidFileMatcher,
   parentLoadingEntries: readonly { path: string; treePosition: number }[] = [],
+  parentLayoutPaths: readonly string[] = [],
 ): void {
   if (!fs.existsSync(currentDir)) return;
 
@@ -2813,12 +2814,15 @@ function scanForInterceptingPages(
         slotRootDir,
         results,
         matcher,
-        [],
+        // An intercepted slot replaces the slot's layout chain, so it keeps
+        // the layouts of the slot segments above the marker.
+        parentLayoutPaths,
         parentLoadingEntries,
         path.relative(slotRootDir, currentDir).split(path.sep).filter(Boolean).length,
       );
     } else {
       // Regular subdirectory — keep scanning for intercepting dirs
+      const layout = findFile(interceptDir, "layout", matcher);
       const loading = findFile(interceptDir, "loading", matcher);
       const loadingEntries = loading
         ? [
@@ -2838,6 +2842,7 @@ function scanForInterceptingPages(
         results,
         matcher,
         loadingEntries,
+        layout ? [...parentLayoutPaths, layout] : parentLayoutPaths,
       );
     }
   }
@@ -2938,7 +2943,15 @@ function collectInterceptingPages(
         convention,
         layoutPaths: [...layoutPaths],
         layoutSegments: layoutPaths.map((layoutPath) => {
-          const relativeDir = path.relative(interceptRoot, path.dirname(layoutPath));
+          const layoutDir = path.dirname(layoutPath);
+          if (
+            slotRootDir &&
+            layoutDir !== interceptRoot &&
+            !layoutDir.startsWith(`${interceptRoot}${path.sep}`)
+          ) {
+            return path.relative(slotRootDir, layoutDir).split(path.sep).filter(Boolean);
+          }
+          const relativeDir = path.relative(interceptRoot, layoutDir);
           return [
             ...slotParentSegments,
             interceptSegment,

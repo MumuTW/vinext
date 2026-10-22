@@ -1846,6 +1846,42 @@ describe("matchAppRoute - URL matching", () => {
     });
   });
 
+  it("keeps the layouts on common slot ancestry before an intercept marker", async () => {
+    // The intercepted slot replaces the slot's layout chain, so it renders
+    // @modal/gallery/layout.tsx around its own branch, as Next.js does.
+    await withTempDir("vinext-app-intercept-common-layout-", async (tmpDir) => {
+      const appDir = path.join(tmpDir, "app");
+
+      await mkdir(path.join(appDir, "@modal", "gallery", "(.)photo"), { recursive: true });
+      await mkdir(path.join(appDir, "gallery", "photo"), { recursive: true });
+      await writeFile(path.join(appDir, "layout.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "@modal", "default.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "@modal", "gallery", "layout.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "@modal", "gallery", "not-found.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "@modal", "gallery", "(.)photo", "layout.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "@modal", "gallery", "(.)photo", "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "gallery", "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "gallery", "photo", "page.tsx"), EMPTY_PAGE);
+
+      invalidateAppRouteCache();
+      const routes = await appRouter(appDir);
+      const galleryRoute = routes.find((route) => route.pattern === "/gallery");
+      const modalSlot = galleryRoute?.parallelSlots.find((slot) => slot.name === "modal");
+      const intercept = modalSlot?.interceptingRoutes[0];
+
+      expect(intercept?.layoutPaths).toEqual([
+        canonical(path.join(appDir, "@modal", "gallery", "layout.tsx")),
+        canonical(path.join(appDir, "@modal", "gallery", "(.)photo", "layout.tsx")),
+      ]);
+      expect(intercept?.layoutSegments).toEqual([["gallery"], ["gallery", "photo"]]);
+      expect(intercept?.notFoundPaths).toEqual([
+        canonical(path.join(appDir, "@modal", "gallery", "not-found.tsx")),
+      ]);
+      expect(intercept?.notFoundTreePositions).toEqual([1]);
+    });
+  });
+
   it("allows inherited intercepting slots to reuse the same target pattern", async () => {
     await withTempDir("vinext-app-intercept-inherited-slot-", async (tmpDir) => {
       const appDir = path.join(tmpDir, "app");
