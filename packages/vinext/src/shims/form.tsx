@@ -22,7 +22,7 @@ import {
   forwardRef,
   useActionState,
   useCallback,
-  useLayoutEffect,
+  useEffect,
   useRef,
   type FormHTMLAttributes,
   type ForwardedRef,
@@ -34,14 +34,12 @@ import {
 import { useMergedRef } from "./use-merged-ref.js";
 import {
   getMountedSlotsHeader,
-  getPrefetchCache,
   getPrefetchInterceptionContext,
   getPrefetchedUrls,
   hasPrefetchCacheEntryForNavigation,
   navigateClientSide,
   prefetchRscResponse,
 } from "./navigation.js";
-import { claimAppPrefetchFetch } from "./internal/app-prefetch-fetch-queue.js";
 import { assertSafeNavigationUrl } from "./url-safety.js";
 import { withBasePath } from "./url-utils.js";
 import { createRscRequestHeaders, createRscRequestUrl } from "../server/app-rsc-cache-busting.js";
@@ -306,10 +304,8 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
   // Viewport-based prefetch: when the form enters the viewport, prefetch the
   // RSC payload for the action URL. App Router only; disabled in dev (matches
   // Next.js behavior). Gated by `prefetch !== false` and string action.
-  // Reference: link.tsx IntersectionObserver wiring pattern. A layout effect,
-  // like Link's, so unmounting releases its prefetch claims in the commit that
-  // detaches it.
-  useLayoutEffect(() => {
+  // Reference: link.tsx IntersectionObserver wiring pattern.
+  useEffect(() => {
     if (typeof action !== "string") return;
     if (prefetch === false || process.env.NODE_ENV !== "production") return;
     // External destinations remain valid form markup and native navigation
@@ -320,11 +316,6 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
     if (!node) return;
     if (typeof IntersectionObserver === "undefined") return;
 
-    // Claims on reused prefetches last for this effect run, not for the node,
-    // which React keeps when `action` changes.
-    let active = true;
-    const isActive = () => active;
-    const releaseClaims: Array<() => void> = [];
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -359,25 +350,18 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
               const cacheKey = AppElementsWire.encodeCacheKey(rscUrl, interceptionContext);
               // Dedup: skip if already in-flight or a fresh cache entry exists,
               // matching the gate link.tsx applies to avoid double-fetching a
-              // payload that a nearby <Link> already prefetched. This Form only
-              // prefetches once, so it claims a reused request that is still
-              // queued: the Link that queued it drops it on leaving the viewport.
-              const claim = (fetchPromise: Promise<Response> | undefined) => {
-                // Cleanup may have run while this callback awaited.
-                if (active) releaseClaims.push(claimAppPrefetchFetch(fetchPromise, isActive));
-              };
+              // payload that a nearby <Link> already prefetched. A pending Link
+              // prefetch is not reused: this Form prefetches only once, and the
+              // Link cancels its request if it leaves before the request starts.
               const prefetched = getPrefetchedUrls();
-              if (prefetched.has(cacheKey)) {
-                claim(getPrefetchCache().get(cacheKey)?.fetchPromise);
-                return;
-              }
+              if (prefetched.has(cacheKey)) return;
               if (
                 hasPrefetchCacheEntryForNavigation(
                   rscUrl,
                   interceptionContext,
                   mountedSlotsHeader,
                   {
-                    onReuse: (entry) => claim(entry.fetchPromise),
+                    reusePending: false,
                   },
                 )
               )
@@ -413,8 +397,6 @@ const Form = forwardRef(function Form(props: FormProps, ref: ForwardedRef<HTMLFo
     observer.observe(node);
     return () => {
       observer.unobserve(node);
-      active = false;
-      for (const release of releaseClaims) release();
     };
     // `actionHref` is derived purely from `action` (+ the module-constant
     // `__basePath`), so it's technically redundant alongside `action` here, but

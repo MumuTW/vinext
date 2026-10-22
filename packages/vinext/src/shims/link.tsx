@@ -74,6 +74,7 @@ import { normalizeRouterHref, resolvePagesRouterHref } from "./internal/normaliz
 import { formatUrlObject, formatUrlObjectWithValidation } from "./internal/format-url-object.js";
 import {
   cancelQueuedAppPrefetchFetch,
+  getAppPrefetchFetchClaimSequence,
   isAppPrefetchFetchClaimed,
   scheduleAppPrefetchFetch,
 } from "./internal/app-prefetch-fetch-queue.js";
@@ -838,8 +839,8 @@ let visibleAppPrefetchDrainScheduled = false;
  * the same request share it. So each viewport prefetch records the visible
  * Links that created or reused it. When the last of them leaves, the prefetch
  * is dropped: its queued requests are cancelled and its later stages are never
- * sent, unless a current navigation is waiting on it. A Link that comes back
- * prefetches again with the current page's inputs.
+ * sent, unless a navigation that claimed it before then is still current. A
+ * Link that comes back prefetches again with the current page's inputs.
  */
 type OwnedLinkPrefetch = {
   owners: Set<LinkPrefetchInstance>;
@@ -847,7 +848,8 @@ type OwnedLinkPrefetch = {
   requests: Array<Promise<Response>>;
   /** The cached promise a navigation claims. */
   claimable?: Promise<Response>;
-  dropped: boolean;
+  /** The claim sequence when the last owner left; later claims are ignored. */
+  droppedAt?: number;
 };
 
 const ownedLinkPrefetches = new WeakMap<Promise<Response>, OwnedLinkPrefetch>();
@@ -856,7 +858,7 @@ function createOwnedLinkPrefetch(
   owner: LinkPrefetchInstance | undefined,
 ): OwnedLinkPrefetch | undefined {
   if (owner === undefined) return undefined;
-  return { owners: new Set([owner]), requests: [], dropped: false };
+  return { owners: new Set([owner]), requests: [] };
 }
 
 function hasVisibleOwner(owned: OwnedLinkPrefetch): boolean {
@@ -867,8 +869,10 @@ function hasVisibleOwner(owned: OwnedLinkPrefetch): boolean {
 }
 
 function isOwnedLinkPrefetchWanted(owned: OwnedLinkPrefetch): boolean {
-  if (isAppPrefetchFetchClaimed(owned.claimable)) return true;
-  return !owned.dropped && hasVisibleOwner(owned);
+  if (owned.droppedAt !== undefined) {
+    return isAppPrefetchFetchClaimed(owned.claimable, owned.droppedAt);
+  }
+  return isAppPrefetchFetchClaimed(owned.claimable) || hasVisibleOwner(owned);
 }
 
 function scheduleOwnedLinkPrefetch(
@@ -876,6 +880,11 @@ function scheduleOwnedLinkPrefetch(
   fetcher: (signal: AbortSignal) => Promise<Response>,
   priority: "low" | "high",
 ): Promise<Response> {
+  // A later stage of a dropped prefetch fails right away, which also removes
+  // its cache entry.
+  if (owned && !isOwnedLinkPrefetchWanted(owned)) {
+    return Promise.reject(new DOMException("Prefetch is no longer wanted", "AbortError"));
+  }
   const request = scheduleAppPrefetchFetch(
     fetcher,
     priority,
@@ -905,7 +914,9 @@ function trackOwnedLinkPrefetch(
       owner.ownedPrefetches.delete(owned);
       // A Link that came back while the dropped prefetch was still settling
       // joined it instead of starting a fresh one.
-      if (failed && owned.dropped && owner.isVisible) scheduleVisibleAppPrefetch(owner);
+      if (failed && owned.droppedAt !== undefined && owner.isVisible) {
+        scheduleVisibleAppPrefetch(owner);
+      }
     }
     owned.owners.clear();
   };
@@ -929,9 +940,9 @@ function joinOwnedLinkPrefetch(
 function releaseOwnedLinkPrefetches(instance: LinkPrefetchInstance): void {
   for (const owned of instance.ownedPrefetches) {
     owned.owners.delete(instance);
-    if (owned.dropped || hasVisibleOwner(owned)) continue;
-    // Dropped even while claimed, so the claim alone keeps it alive.
-    owned.dropped = true;
+    if (owned.droppedAt !== undefined || hasVisibleOwner(owned)) continue;
+    // Dropped even while claimed, so only claims made before now keep it alive.
+    owned.droppedAt = getAppPrefetchFetchClaimSequence();
     if (isAppPrefetchFetchClaimed(owned.claimable)) continue;
     for (const request of owned.requests) cancelQueuedAppPrefetchFetch(request);
   }

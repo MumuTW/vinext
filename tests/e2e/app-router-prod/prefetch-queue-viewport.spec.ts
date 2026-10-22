@@ -203,52 +203,38 @@ test("re-prefetches with the current page after a persistent Link leaves and ret
   }
 });
 
-// A Form prefetches its destination once, when it enters the viewport, reusing
-// a Link's pending request for the same route. That request is still sent after
-// the Link leaves, while the Form is mounted.
-test("sends a queued Link prefetch that a visible Form reused after the Link leaves", async ({
+// A Form prefetches its destination once, when it enters the viewport. It does
+// not wait on a Link's queued prefetch for the same route, which the Link
+// cancels if it leaves first.
+test("prefetches a Form's destination while a Link's prefetch for it is queued", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 600 });
   const prefetches = await holdPrefetchSlots(page);
+  const formPrefetches: string[] = [];
+  page.on("request", (request) => {
+    const headers = request.headers();
+    const { pathname } = new URL(request.url());
+    // Unlike a Link's, the Form's prefetch has no router state headers.
+    if (
+      pathname.replace(/\.rsc$/, "") === `${TARGET_PREFIX}9` &&
+      headers["x-vinext-rsc-render-mode"] === "prefetch-loading-shell" &&
+      headers["next-router-prefetch"] === undefined
+    ) {
+      formPrefetches.push(request.url());
+    }
+  });
 
   try {
     await page.goto("/prefetch-queue-viewport?form");
     await waitForAppRouterHydration(page);
     await waitForQueuedPrefetches(page, prefetches.heldTargets);
     expect(prefetches.heldTargets.has("9")).toBe(false);
-    // Reusing a cache entry moves it to the end of the cache. Move another
-    // entry there first, so the Form's reuse is observable.
-    const lastPrefetchCacheKey = () =>
-      page.evaluate(() => {
-        const cache = (window as unknown as { __VINEXT_RSC_PREFETCH_CACHE__: Map<string, unknown> })
-          .__VINEXT_RSC_PREFETCH_CACHE__;
-        return [...cache.keys()].at(-1);
-      });
-    await page.evaluate(() => {
-      const cache = (window as unknown as { __VINEXT_RSC_PREFETCH_CACHE__: Map<string, unknown> })
-        .__VINEXT_RSC_PREFETCH_CACHE__;
-      const key = [...cache.keys()].find((cacheKey) => !cacheKey.includes("/9"));
-      if (key === undefined) return;
-      const entry = cache.get(key);
-      cache.delete(key);
-      cache.set(key, entry);
-    });
-    expect(await lastPrefetchCacheKey()).not.toContain("/prefetch-queue-viewport/9");
+    expect(formPrefetches).toEqual([]);
 
-    // Bring the Form into range while the Link is still visible, and wait for
-    // it to reuse the Link's queued request.
+    // Bring the Form into range while the Link's prefetch is still queued.
     await page.setViewportSize({ width: 1280, height: 2400 });
-    await expect.poll(lastPrefetchCacheKey).toContain("/prefetch-queue-viewport/9");
-
-    await page.setViewportSize({ width: 1280, height: 600 });
-    await page.locator("#queue-form").scrollIntoViewIfNeeded();
-    await waitForLinksIntersecting(page, "#form-link", false);
-    const requestedBefore = prefetches.requestedTargets.length;
-    prefetches.releaseHeld();
-    await waitForQueuedPrefetchesToSettle(page);
-
-    expect(prefetches.requestedTargets.slice(requestedBefore)).toContain("9");
+    await expect.poll(() => formPrefetches.length).toBe(1);
   } finally {
     prefetches.releaseHeld();
     await page.unrouteAll({ behavior: "wait" });

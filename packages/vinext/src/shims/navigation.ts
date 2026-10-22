@@ -693,6 +693,8 @@ export function hasPrefetchCacheEntryForNavigation(
     onInvalidate?: () => void;
     /** Called with the matched entry when it is reused. */
     onReuse?: (entry: PrefetchCacheEntry) => void;
+    /** Whether an in-flight entry counts as reusable. Defaults to true. */
+    reusePending?: boolean;
   } = {},
 ): boolean {
   const match = findPrefetchCacheEntryForNavigation(
@@ -703,6 +705,7 @@ export function hasPrefetchCacheEntryForNavigation(
   );
   if (match === null) return false;
 
+  if (match.entry.pending !== undefined && options.reusePending === false) return false;
   // In flight, or settled and still fresh: either way the entry is reusable.
   if (
     match.entry.pending !== undefined ||
