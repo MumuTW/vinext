@@ -2841,7 +2841,6 @@ async function createPagesRouterRequestHandler(
               ? wrapMiddlewareWithBasePath(runNodeMiddleware, basePath, sourceHadBasePath)
               : null,
             renderPage: null,
-            handleApi: null,
             serveFilesystemRoute: async (
               candidate,
               _stagedHeaders,

@@ -74,6 +74,43 @@ describe.each(["app", "pages"] as const)(
           "export default function Layout({ children }) { return <html><body>{children}</body></html>; }\n",
         );
       }
+      const apiDir = path.join(fixtureDir, router, "api", router === "app" ? "image" : "");
+      await fs.mkdir(apiDir, { recursive: true });
+      await fs.writeFile(
+        path.join(apiDir, router === "app" ? "route.js" : "image.js"),
+        router === "app"
+          ? `export function GET(request) {
+              if (request.headers.has("cookie") || request.headers.has("authorization")) {
+                return new Response("Expected an anonymous GET", { status: 403 });
+              }
+              const kind = new URL(request.url).searchParams.get("kind");
+              return new Response(kind === "not-image" ? "not an image" : Buffer.from(${JSON.stringify(SOURCE_PNG.toString("base64"))}, "base64"), {
+                status: kind === "missing" ? 404 : 200,
+                headers: { "Content-Type": kind === "not-image" ? "text/html" : "image/png", "Set-Cookie": "source=private" },
+              });
+            }\n`
+          : `export default function handler(req, res) {
+              if (req.method !== "GET" || req.headers.cookie || req.headers.authorization) {
+                res.status(403).end("Expected an anonymous GET");
+                return;
+              }
+              const kind = req.query.kind;
+              res.status(kind === "missing" ? 404 : 200);
+              res.setHeader("Content-Type", kind === "not-image" ? "text/html" : "image/png");
+              res.setHeader("Set-Cookie", "source=private");
+              res.end(kind === "not-image" ? "not an image" : Buffer.from(${JSON.stringify(SOURCE_PNG.toString("base64"))}, "base64"));
+            }\n`,
+      );
+      await fs.writeFile(
+        path.join(fixtureDir, "middleware.js"),
+        `import { NextResponse } from "next/server";
+         export function middleware(request) {
+           if (request.nextUrl.pathname === "/api/image" && request.nextUrl.searchParams.get("kind") === "blocked") {
+             return new Response("Image source denied", { status: 403 });
+           }
+           return NextResponse.next();
+         }\n`,
+      );
       await fs.writeFile(
         path.join(fixtureDir, router === "app" ? "app/page.jsx" : "pages/index.jsx"),
         "export default function Page() { return <p>image optimizer fixture</p>; }\n",
@@ -82,7 +119,10 @@ describe.each(["app", "pages"] as const)(
       await fs.writeFile(
         path.join(fixtureDir, "next.config.mjs"),
         `export default {
-        rewrites: async () => [{ source: "/media/:path*", destination: ${JSON.stringify(upstreamUrl)} + "/:path*" }],
+        rewrites: async () => [
+          { source: "/media/:path*", destination: ${JSON.stringify(upstreamUrl)} + "/:path*" },
+          { source: "/generated-image", destination: "/api/image" },
+        ],
       };\n`,
       );
       const adapterPath = path.join(fixtureDir, "image-optimizer.mjs");
@@ -193,6 +233,56 @@ describe.each(["app", "pages"] as const)(
       },
     );
 
+    // Next.js fetchInternalImage dispatches anonymous source requests through
+    // the full router, including APIs: packages/next/src/server/image-optimizer.ts.
+    // https://github.com/vercel/next.js/blob/7657545d157a04c3b21112f08e4675a4ebffeb5a/packages/next/src/server/image-optimizer.ts#L938
+    it.each(["/api/image", "/generated-image"])(
+      "optimizes API image source %s through an anonymous GET",
+      async (source) => {
+        const direct = await fetch(`${baseUrl}${source}`);
+        expect(direct.status).toBe(200);
+        expect(Buffer.from(await direct.arrayBuffer())).toEqual(SOURCE_PNG);
+
+        const response = await fetch(
+          `${baseUrl}/_next/image?url=${encodeURIComponent(source)}&w=64&q=75`,
+          {
+            headers: {
+              Accept: "image/webp",
+              Cookie: "caller=private",
+              Authorization: "Bearer caller",
+            },
+          },
+        );
+        const body = await response.text();
+        expect(response.status, body).toBe(200);
+        expect(response.headers.get("content-type")).toBe("image/webp");
+        expect(response.headers.has("set-cookie")).toBe(false);
+        expect(body).toBe(`transformed:${SOURCE_PNG.toString("base64")}`);
+      },
+    );
+
+    it("rejects denied, unsuccessful and non-image API sources before transformation", async () => {
+      const optimizer = getImageOptimizer();
+      expect(optimizer).not.toBeNull();
+      const transform = vi.spyOn(optimizer!, "transformImage");
+      try {
+        const denied = await fetch(`${baseUrl}/api/image?kind=blocked`);
+        expect(denied.status).toBe(403);
+        await denied.text();
+        for (const kind of ["blocked", "missing", "not-image"]) {
+          const response = await fetch(
+            `${baseUrl}/_next/image?url=${encodeURIComponent(`/api/image?kind=${kind}`)}&w=64&q=75`,
+          );
+          const body = await response.text();
+          expect(response.status, kind).toBe(400);
+          expect(body).not.toContain("transformed:");
+        }
+        expect(transform).not.toHaveBeenCalled();
+      } finally {
+        transform.mockRestore();
+      }
+    });
+
     it("rejects unsuccessful and non-image rewrite sources before transformation", async () => {
       const optimizer = getImageOptimizer();
       expect(optimizer).not.toBeNull();
@@ -223,6 +313,8 @@ describe.each(["app", "pages"] as const)(
           "/media/banner.png",
           "/media/banner",
           "/media/banner.bin",
+          "/api/image",
+          "/generated-image",
         ]) {
           const response = await fetch(
             `${baseUrl}/_next/image?url=${encodeURIComponent(source)}&w=64&q=75`,
