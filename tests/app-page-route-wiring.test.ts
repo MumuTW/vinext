@@ -2167,6 +2167,85 @@ describe("app page route wiring helpers", () => {
     expect(provider?.props.providerId).toBe("layout:/");
   });
 
+  it("wraps a named slot's page in its own not-found boundary inside the slot's layout", () => {
+    function SlotLayout({ children }: { children?: React.ReactNode }) {
+      return createElement("section", null, children);
+    }
+    function SlotNotFound() {
+      return createElement("p", null, "slot not found");
+    }
+    function InterceptNotFound() {
+      return createElement("p", null, "intercept not found");
+    }
+
+    const slotLayoutModule: AppPageModule = { default: SlotLayout };
+    const slotNotFoundModule: AppPageModule = { default: SlotNotFound };
+    const slotPageModule: AppPageModule = { default: SlotPage };
+    const buildSlotElements = (
+      slotOverrides?: Record<string, AppPageSlotOverride<AppPageModule>>,
+    ) =>
+      buildAppPageElements({
+        element: createElement(PageProbe),
+        makeThenableParams(value) {
+          return Promise.resolve(value);
+        },
+        matchedParams: {},
+        route: {
+          error: null,
+          errors: [null],
+          layoutTreePositions: [],
+          layouts: [],
+          loading: null,
+          notFound: null,
+          notFounds: [null],
+          routeSegments: [],
+          slots: {
+            modal: {
+              default: null,
+              error: null,
+              layout: slotLayoutModule,
+              layoutIndex: -1,
+              loading: null,
+              name: "modal",
+              notFound: slotNotFoundModule,
+              notFoundTreePosition: 0,
+              page: slotPageModule,
+              routeSegments: null,
+            },
+          },
+          templateTreePositions: [],
+          templates: [],
+        },
+        routePath: "/slot-not-found",
+        rootNotFoundModule: null,
+        slotOverrides,
+      });
+
+    const modalSlotId = AppElementsWire.encodeSlotId("modal", "/");
+    const slotLayout = findElementByTypeName(buildSlotElements()[modalSlotId], "SlotLayout");
+    const boundary = findElementByTypeName(slotLayout?.props.children, "NotFoundBoundary");
+    const fallback = boundary?.props.fallback;
+    expect(isValidElement(fallback) ? fallback.type : null).toBe(SlotNotFound);
+
+    // An intercepting route in the slot brings its own nearest not-found.
+    const intercepted = buildSlotElements({
+      modal: {
+        branchSegments: ["(.)photo", "[id]"],
+        layoutModules: [],
+        layoutSegments: [],
+        notFoundModule: { default: InterceptNotFound },
+        notFoundTreePosition: 2,
+        pageModule: { default: SlotPage },
+        params: { id: "1" },
+      },
+    })[modalSlotId];
+    const interceptBoundary = findElementByTypeName(intercepted, "NotFoundBoundary");
+    const interceptFallback = interceptBoundary?.props.fallback;
+    expect(isValidElement(interceptFallback) ? interceptFallback.type : null).toBe(
+      InterceptNotFound,
+    );
+  });
+
   it("uses intercepted override segments for named slot reset boundaries", async () => {
     function SlotError() {
       return createElement("div", null, "slot error");

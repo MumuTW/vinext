@@ -218,6 +218,9 @@ export type AppPageSlotOverride<TModule extends AppPageModule = AppPageModule> =
   layoutModules?: readonly (TModule | null | undefined)[] | null;
   loadingModules?: readonly (TModule | null | undefined)[] | null;
   loadingTreePositions?: readonly number[] | null;
+  /** The intercepting route's nearest not-found.tsx and its branch tree position. */
+  notFoundModule?: TModule | null;
+  notFoundTreePosition?: number | null;
   /**
    * The page module to render for this slot. Optional — when omitted, the
    * slot's existing `page` is used (e.g. when the override only changes the
@@ -1633,11 +1636,22 @@ export function buildAppPageElements<
     }
 
     const slotErrorComponent = getErrorBoundaryExport(slot.error);
+    // The nearest not-found.tsx in the slot's branch belongs to its own
+    // segment, so, as in Next.js, it catches the slot page's notFound() inside
+    // that segment's layout, ahead of any boundary above the slot.
+    const SlotNotFoundComponent = getDefaultExport(
+      hasSlotTreeOverride ? slotOverride?.notFoundModule : slot.notFound,
+    );
+    const slotNotFoundTreePosition = SlotNotFoundComponent
+      ? ((hasSlotTreeOverride ? slotOverride?.notFoundTreePosition : slot.notFoundTreePosition) ??
+        null)
+      : null;
     const branchTreePositions = Array.from(
       new Set([
         ...branchLayouts.keys(),
         ...branchLoadings.keys(),
         ...(slotErrorComponent ? [0] : []),
+        ...(slotNotFoundTreePosition === null ? [] : [slotNotFoundTreePosition]),
         ...nestedBfcacheSegments.flatMap((segment) =>
           segment.treePosition === null ? [] : [segment.treePosition],
         ),
@@ -1678,6 +1692,17 @@ export function buildAppPageElements<
           <Suspense key={loadingResetKey || slotResetKey} fallback={<LoadingComponent />}>
             {slotElement}
           </Suspense>
+        );
+      }
+
+      if (SlotNotFoundComponent && treePosition === slotNotFoundTreePosition) {
+        slotElement = (
+          <NotFoundBoundary
+            resetKey={resolveAppPageTemplateStateKey(branchSegments, treePosition, slotParams)}
+            fallback={<SlotNotFoundComponent />}
+          >
+            {slotElement}
+          </NotFoundBoundary>
         );
       }
 

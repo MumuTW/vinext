@@ -883,6 +883,8 @@ function buildSlotOverrides<TModule extends AppPageModule, TErrorModule extends 
       layoutSegments: opts.interceptLayoutSegments ?? null,
       loadingModules: opts.interceptLoadings || null,
       loadingTreePositions: opts.interceptLoadingTreePositions ?? null,
+      notFoundModule: opts.interceptNotFound ?? null,
+      notFoundTreePosition: opts.interceptNotFoundTreePosition ?? null,
       pageModule: opts.interceptPage,
       params: opts.interceptParams || routeParams,
       routeSegments: resolveInterceptedSlotSegments(
