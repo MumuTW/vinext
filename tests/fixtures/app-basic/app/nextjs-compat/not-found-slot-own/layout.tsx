@@ -22,6 +22,7 @@ export default function Layout({
         <Link href={`${BASE}/team/ok`}>Team ok</Link>
         <Link href={`${BASE}/team/missing`}>Team missing</Link>
         <Link href={`${BASE}/team/missing/members`}>Members missing</Link>
+        <Link href={`${BASE}/team/missing/roster`}>Roster missing</Link>
         <Link href={`${BASE}/item/ok`}>Item ok</Link>
         <Link href={`${BASE}/item/missing`}>Item missing</Link>
       </nav>

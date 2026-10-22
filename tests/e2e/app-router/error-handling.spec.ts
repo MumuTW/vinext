@@ -422,6 +422,15 @@ test.describe("Not Found", () => {
     await expect(page.locator("#slot-own-team-slot #slot-own-team-nf")).toBeVisible();
     await expect(page.locator("#slot-own-root-nf")).toHaveCount(0);
 
+    // A nested slot layout's own notFound() skips the not-found inside it and
+    // reaches the slot root's.
+    await page.getByRole("link", { name: "Roster missing" }).click();
+    await expect(page).toHaveURL(/\/team\/missing\/roster$/);
+    await expect(page.locator("#slot-own-main-roster")).toBeVisible();
+    await expect(page.locator("#slot-own-team-slot #slot-own-team-nf")).toBeVisible();
+    await expect(page.locator("#slot-own-roster-nf")).toHaveCount(0);
+    await expect(page.locator("#slot-own-segment-nf")).toHaveCount(0);
+
     // It clears when the slot renders again.
     await page.getByRole("link", { name: "Team ok" }).click();
     await expect(page.locator("#slot-own-team")).toHaveText("Team ok");

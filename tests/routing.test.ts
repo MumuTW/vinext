@@ -1605,6 +1605,65 @@ describe("matchAppRoute - URL matching", () => {
       );
       expect(localIntercept?.notFoundBranchSegments).toEqual(["foo", "video", "[id]"]);
       expect(localIntercept?.notFoundTreePosition).toBe(2);
+      // Every not-found on the branch gets its own boundary, outermost first.
+      expect(modalSlot?.notFoundPaths).toEqual([
+        canonical(path.join(modalDir, "not-found.tsx")),
+        canonical(path.join(modalDir, "foo", "qux", "not-found.tsx")),
+      ]);
+      expect(modalSlot?.notFoundTreePositions).toEqual([0, 2]);
+      expect(localIntercept?.notFoundPaths).toEqual([
+        canonical(path.join(modalDir, "not-found.tsx")),
+        canonical(path.join(modalDir, "foo", "(.)video", "not-found.tsx")),
+      ]);
+      expect(localIntercept?.notFoundTreePositions).toEqual([0, 2]);
+    });
+  });
+
+  it("finds an inherited slot's not-found files on its mirrored branch", async () => {
+    await withTempDir("vinext-app-inherited-slot-not-found-", async (tmpDir) => {
+      const appDir = path.join(tmpDir, "app");
+      const teamDir = path.join(appDir, "@team");
+
+      await mkdir(path.join(teamDir, "x", "[name]"), { recursive: true });
+      await mkdir(path.join(appDir, "x", "[id]"), { recursive: true });
+      await mkdir(path.join(appDir, "y"), { recursive: true });
+
+      await writeFile(path.join(appDir, "layout.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "x", "[id]", "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "y", "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(teamDir, "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(teamDir, "default.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(teamDir, "not-found.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(teamDir, "x", "[name]", "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(teamDir, "x", "[name]", "not-found.tsx"), EMPTY_PAGE);
+
+      invalidateAppRouteCache();
+      const routes = await appRouter(appDir);
+      const teamSlot = (pattern: string) =>
+        routes
+          .find((route) => route.pattern === pattern)
+          ?.parallelSlots.find((slot) => slot.name === "team");
+
+      // The route's [id] mirrors the slot's [name], so the slot renders
+      // @team/x/[name] and owns that branch's not-found files.
+      const mirrored = teamSlot("/x/:id");
+      expect(mirrored?.pagePath).toBe(canonical(path.join(teamDir, "x", "[name]", "page.tsx")));
+      expect(mirrored?.notFoundPath).toBe(
+        canonical(path.join(teamDir, "x", "[name]", "not-found.tsx")),
+      );
+      expect(mirrored?.notFoundTreePosition).toBe(2);
+      expect(mirrored?.notFoundPaths).toEqual([
+        canonical(path.join(teamDir, "not-found.tsx")),
+        canonical(path.join(teamDir, "x", "[name]", "not-found.tsx")),
+      ]);
+      expect(mirrored?.notFoundTreePositions).toEqual([0, 2]);
+
+      // A default branch keeps only the slot root's not-found.
+      const fallback = teamSlot("/y");
+      expect(fallback?.pagePath).toBeNull();
+      expect(fallback?.notFoundPaths).toEqual([canonical(path.join(teamDir, "not-found.tsx"))]);
+      expect(fallback?.notFoundTreePositions).toEqual([0]);
     });
   });
 
