@@ -6,6 +6,7 @@ const MAX_DEFAULT_APP_PREFETCH_REQUESTS = 4;
 const defaultAppPrefetchQueue: Array<() => void> = [];
 type AppPrefetchFetchControl = {
   cancel: () => void;
+  cancelQueued?: () => void;
   runner?: (promoted?: boolean) => void;
 };
 /** Lets a consumer promote or cancel the request behind a promise it already holds. */
@@ -121,24 +122,31 @@ export function scheduleAppPrefetchFetch(
     };
   });
 
+  const cancelQueued = () => {
+    if (started) return;
+    const index = defaultAppPrefetchQueue.indexOf(runner);
+    if (index === -1) return;
+    defaultAppPrefetchQueue.splice(index, 1);
+    appPrefetchFetchControls.delete(promise);
+    controller.abort();
+    rejectPromise(controller.signal.reason);
+  };
   defaultAppPrefetchQueue.push(runner);
   appPrefetchFetchControls.set(promise, {
     runner,
+    cancelQueued,
     cancel: () => {
-      if (started) {
-        controller.abort();
-        return;
-      }
-      const index = defaultAppPrefetchQueue.indexOf(runner);
-      if (index === -1) return;
-      defaultAppPrefetchQueue.splice(index, 1);
-      appPrefetchFetchControls.delete(promise);
-      controller.abort();
-      rejectPromise(controller.signal.reason);
+      if (started) controller.abort();
+      else cancelQueued();
     },
   });
   scheduleDefaultAppPrefetchDrain();
   return promise;
+}
+
+/** Cancel a prefetch request that is still waiting for a slot; never aborts one in flight. */
+export function cancelQueuedAppPrefetchFetch(promise: Promise<Response>): void {
+  appPrefetchFetchControls.get(promise)?.cancelQueued?.();
 }
 
 /** Cancel a queued or in-flight prefetch request. No-op once it has settled. */

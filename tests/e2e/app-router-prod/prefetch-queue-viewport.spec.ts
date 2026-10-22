@@ -45,6 +45,8 @@ async function holdPrefetchSlots(page: Page) {
   const state = {
     heldTargets: new Set<string>(),
     requestedTargets: [] as string[],
+    /** The `Next-Url` header of each request in `requestedTargets`. */
+    requestNextUrls: [] as Array<string | undefined>,
     releaseHeld,
   };
 
@@ -56,6 +58,7 @@ async function holdPrefetchSlots(page: Page) {
     }
     const target = pathname.slice(TARGET_PREFIX.length).replace(/\.rsc$/, "");
     state.requestedTargets.push(target);
+    state.requestNextUrls.push(request.headers()["next-url"]);
     if (state.heldTargets.size < 4) {
       state.heldTargets.add(target);
       const response = await route.fetch();
@@ -157,6 +160,43 @@ test("sends a shared queued prefetch while another Link using it is still visibl
 
     const queuedTargets = TARGETS.filter((target) => !prefetches.heldTargets.has(target));
     expect(prefetches.requestedTargets.slice(requestedBefore).sort()).toEqual(queuedTargets);
+  } finally {
+    prefetches.releaseHeld();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
+// A Link that leaves the viewport drops its queued prefetch for good. If it
+// comes back on a later page, it prefetches again with that page's inputs
+// instead of sending the request the previous page queued.
+test("re-prefetches with the current page after a persistent Link leaves and returns", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const prefetches = await holdPrefetchSlots(page);
+
+  try {
+    await page.goto("/prefetch-queue-persistent/a");
+    await waitForAppRouterHydration(page);
+    await waitForQueuedPrefetches(page, prefetches.heldTargets);
+
+    await page.locator("#go-to-b").scrollIntoViewIfNeeded();
+    await waitForLinksIntersecting(page, ".persistent-link", false);
+    await page.locator("#go-to-b").click();
+    await expect(page.getByRole("heading", { name: "Page B" })).toBeVisible();
+
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await waitForLinksIntersecting(page, ".persistent-link", true);
+    const requestedBefore = prefetches.requestedTargets.length;
+    prefetches.releaseHeld();
+
+    const queuedTargets = TARGETS.filter((target) => !prefetches.heldTargets.has(target));
+    await expect
+      .poll(() => [...new Set(prefetches.requestedTargets.slice(requestedBefore))].sort())
+      .toEqual(expect.arrayContaining(queuedTargets));
+    expect(new Set(prefetches.requestNextUrls.slice(requestedBefore))).toEqual(
+      new Set(["/prefetch-queue-persistent/b"]),
+    );
   } finally {
     prefetches.releaseHeld();
     await page.unrouteAll({ behavior: "wait" });
