@@ -35,7 +35,8 @@ import {
   IMAGE_RESPONSE_CACHE_STATE,
   INVALID_IMAGE_SOURCE_MESSAGE,
   getImageOptimizer,
-  handleConfiguredImageOptimization,
+  getImageOptimizerRevision,
+  handleImageOptimization,
   invalidImageSourceResponse,
   parseImageParams,
   isImageSourceBodyStatus,
@@ -45,6 +46,7 @@ import {
   DEFAULT_IMAGE_SIZES,
   type ImageConfig,
   type ImageOptimizationSignal,
+  type ImageOptimizer,
 } from "./image-optimization.js";
 import { normalizePath } from "./normalize-path.js";
 import { registerPrerenderCloudflareLoader } from "../build/prerender-cloudflare-loader.js";
@@ -752,6 +754,20 @@ function readCachedImageSource(
   return new Response(body, { headers: { "Content-Type": file.headers["Content-Type"] } });
 }
 
+function createServerImageOptimizerGetter(
+  entry: { __createConfiguredImageOptimizer?: () => ImageOptimizer | null },
+  entryRequire: ServerEntryRequire,
+): () => ImageOptimizer | null {
+  const configuredOptimizer = runWithServerEntryRequire(entryRequire, () =>
+    entry.__createConfiguredImageOptimizer?.(),
+  );
+  const revision = getImageOptimizerRevision();
+  const initialOptimizer = configuredOptimizer ?? getImageOptimizer();
+  // Build configuration belongs to this server. Subsequent explicit setter
+  // calls remain process-wide overrides, including null and repeated values.
+  return () => (getImageOptimizerRevision() === revision ? initialOptimizer : getImageOptimizer());
+}
+
 async function serveNodeImageOptimization(
   req: IncomingMessage,
   res: ServerResponse,
@@ -759,26 +775,32 @@ async function serveNodeImageOptimization(
   fetchSource: () => Response | Promise<Response>,
   allowedWidths: number[],
   imageConfig: ImageConfig | undefined,
+  optimizer: ImageOptimizer | null,
 ): Promise<void> {
-  const response = await handleConfiguredImageOptimization(
+  const response = await handleImageOptimization(
     request,
-    async () => {
-      const source = await fetchSource();
-      if (
-        !isImageSourceBodyStatus(source.status) ||
-        !source.body ||
-        !isSafeImageContentType(
-          source.headers.get("Content-Type"),
-          imageConfig?.dangerouslyAllowSVG,
-        )
-      ) {
-        cancelResponseBody(source);
-        return invalidImageSourceResponse();
-      }
-      // Source response cookies and cache policy do not belong to the image.
-      return new Response(source.body, {
-        headers: { "Content-Type": source.headers.get("Content-Type")! },
-      });
+    {
+      fetchAsset: async () => {
+        const source = await fetchSource();
+        if (
+          !isImageSourceBodyStatus(source.status) ||
+          !source.body ||
+          !isSafeImageContentType(
+            source.headers.get("Content-Type"),
+            imageConfig?.dangerouslyAllowSVG,
+          )
+        ) {
+          cancelResponseBody(source);
+          return invalidImageSourceResponse();
+        }
+        // Source response cookies and cache policy do not belong to the image.
+        return new Response(source.body, {
+          headers: { "Content-Type": source.headers.get("Content-Type")! },
+        });
+      },
+      transformImage: optimizer
+        ? (body, options) => optimizer.transformImage(body, options)
+        : undefined,
     },
     allowedWidths,
     imageConfig,
@@ -1897,9 +1919,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   // rebuild to the same path (e.g. across test describe blocks).
   const rscModule = await importServerEntryModule(rscEntryPath);
   const rscEntryRequire = createServerEntryRequire(rscEntryPath);
-  runWithServerEntryRequire(rscEntryRequire, () =>
-    rscModule.__registerConfiguredImageOptimizer?.(),
-  );
+  const getServerImageOptimizer = createServerImageOptimizerGetter(rscModule, rscEntryRequire);
   const rscHandler = resolveAppRouterHandler(rscModule.default);
   const workerEntry =
     rscModule.default && typeof rscModule.default === "object"
@@ -2051,7 +2071,8 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
         sendUnsafeContentType();
         return true;
       }
-      if (getImageOptimizer() !== null) {
+      const optimizer = getServerImageOptimizer();
+      if (optimizer !== null) {
         await serveNodeImageOptimization(
           req,
           res,
@@ -2059,6 +2080,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
           () => readCachedImageSource(staticCache, sourcePath, request.signal),
           appImageAllowedWidths,
           imageConfig,
+          optimizer,
         );
         return true;
       }
@@ -2136,6 +2158,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
           },
           appImageAllowedWidths,
           imageConfig,
+          getServerImageOptimizer(),
         );
         return;
       }
@@ -2484,9 +2507,7 @@ async function createPagesRouterRequestHandler(
   const serverEntryRequire = createServerEntryRequire(serverEntryPath);
   // The built-in image endpoint does not render a page before it needs the
   // adapter. Keep initialization on the Node host so Workers can supply env.
-  runWithServerEntryRequire(serverEntryRequire, () =>
-    serverEntry.__registerConfiguredImageOptimizer?.(),
-  );
+  const getServerImageOptimizer = createServerImageOptimizerGetter(serverEntry, serverEntryRequire);
   const {
     renderPage,
     handleApiRoute: handleApi,
@@ -3011,7 +3032,8 @@ async function createPagesRouterRequestHandler(
                 sendUnsafeContentType();
                 return true;
               }
-              if (getImageOptimizer() !== null) {
+              const optimizer = getServerImageOptimizer();
+              if (optimizer !== null) {
                 await serveNodeImageOptimization(
                   req,
                   res,
@@ -3019,6 +3041,7 @@ async function createPagesRouterRequestHandler(
                   () => readCachedImageSource(staticCache, sourcePath, webRequest.signal),
                   allowedImageWidths,
                   pagesImageConfig,
+                  optimizer,
                 );
                 return true;
               }
@@ -3084,6 +3107,7 @@ async function createPagesRouterRequestHandler(
                 },
                 allowedImageWidths,
                 pagesImageConfig,
+                getServerImageOptimizer(),
               );
               return true;
             }

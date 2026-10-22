@@ -901,7 +901,7 @@ ${
     : `import { createAppRscHandler } from "vinext/server/app-rsc-combined-handler";`
 }
 import { registerConfiguredCacheAdapters as __registerConfiguredCacheAdapters } from "virtual:vinext-cache-adapters";
-export { registerConfiguredImageOptimizer as __registerConfiguredImageOptimizer } from "virtual:vinext-image-adapters";
+export { createConfiguredImageOptimizer as __createConfiguredImageOptimizer } from "virtual:vinext-image-adapters";
 import __pagesClientAssets from "virtual:vinext-pages-client-assets";
 ${
   actionOwners === undefined

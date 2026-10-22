@@ -7,6 +7,7 @@ import vinext from "../packages/vinext/src/index.js";
 import {
   getImageOptimizer,
   setImageOptimizer,
+  type ImageOptimizer,
 } from "../packages/vinext/src/server/image-optimization.js";
 import { startProdServer } from "../packages/vinext/src/server/prod-server.js";
 
@@ -36,7 +37,12 @@ describe.each(["app", "pages"] as const)(
     let upstream: Server | undefined;
     let server: Server | undefined;
     let baseUrl: string;
+    let optimizerKey: string;
+    let buildServer: (mode: "configured" | "none" | "throws", outDir: string) => Promise<Server>;
     const upstreamCredentials: boolean[] = [];
+
+    const fixtureOptimizer = () =>
+      (globalThis as unknown as Record<symbol, ImageOptimizer>)[Symbol.for(optimizerKey)];
 
     beforeAll(async () => {
       setImageOptimizer(null);
@@ -56,6 +62,7 @@ describe.each(["app", "pages"] as const)(
       fixtureDir = await fs.mkdtemp(
         path.join(import.meta.dirname, `.tmp-${router}-image-optimizer-`),
       );
+      optimizerKey = `vinext-test-optimizer:${fixtureDir}`;
       await fs.mkdir(path.join(fixtureDir, router));
       await fs.mkdir(path.join(fixtureDir, "public"));
       await fs.mkdir(path.join(fixtureDir, "node_modules"));
@@ -130,7 +137,7 @@ describe.each(["app", "pages"] as const)(
         adapterPath,
         `export default function createOptimizer() {
         const encode = globalThis.require("./image-encoder.cjs");
-        return {
+        const optimizer = {
           async transformImage(body, { width, format, quality }) {
             const source = Buffer.from(await new Response(body).arrayBuffer());
             return new Response(encode(source), {
@@ -142,31 +149,61 @@ describe.each(["app", "pages"] as const)(
             });
           },
         };
+        globalThis[Symbol.for(${JSON.stringify(optimizerKey)})] = optimizer;
+        return optimizer;
       }\n`,
       );
-      const outDir = path.join(fixtureDir, "dist");
-      const builder = await createBuilder({
-        root: fixtureDir,
-        configFile: false,
-        logLevel: "silent",
-        plugins: [
-          vinext({
-            ...(router === "app" ? { appDir: fixtureDir } : { disableAppRouter: true }),
-            rscOutDir: path.join(outDir, "server"),
-            ssrOutDir: path.join(outDir, "server/ssr"),
-            clientOutDir: path.join(outDir, "client"),
-            images: { optimizer: { adapter: adapterPath } },
-          }),
-        ],
-      });
-      await builder.buildApp();
-      // Adapter initialization must resolve CommonJS dependencies relative to
-      // the built server entry, just like its request handlers do.
+      const throwingAdapterPath = path.join(fixtureDir, "throwing-optimizer.mjs");
       await fs.writeFile(
-        path.join(outDir, "server/image-encoder.cjs"),
-        'module.exports = (source) => "transformed:" + source.toString("base64");\n',
+        throwingAdapterPath,
+        'export default function() { throw new Error("fixture initialization failed"); }\n',
       );
-      ({ server } = await startProdServer({ port: 0, host: "127.0.0.1", outDir }));
+      buildServer = async (mode, outDir) => {
+        const buildRoot = outDir === path.join(fixtureDir!, "dist") ? fixtureDir! : outDir;
+        const buildOutDir = path.join(buildRoot, "dist");
+        if (buildRoot !== fixtureDir) {
+          await fs.mkdir(buildRoot, { recursive: true });
+          for (const entry of [
+            router,
+            "public",
+            "package.json",
+            "next.config.mjs",
+            "middleware.js",
+          ]) {
+            await fs.cp(path.join(fixtureDir!, entry), path.join(buildRoot, entry), {
+              recursive: true,
+            });
+          }
+        }
+        const builder = await createBuilder({
+          root: buildRoot,
+          configFile: false,
+          logLevel: "silent",
+          plugins: [
+            vinext({
+              ...(router === "app" ? { appDir: buildRoot } : { disableAppRouter: true }),
+              rscOutDir: path.join(buildOutDir, "server"),
+              ssrOutDir: path.join(buildOutDir, "server/ssr"),
+              clientOutDir: path.join(buildOutDir, "client"),
+              images:
+                mode === "none"
+                  ? undefined
+                  : {
+                      optimizer: { adapter: mode === "throws" ? throwingAdapterPath : adapterPath },
+                    },
+            }),
+          ],
+        });
+        await builder.buildApp();
+        // Adapter initialization must resolve CommonJS dependencies relative to
+        // the built server entry, just like its request handlers do.
+        await fs.writeFile(
+          path.join(buildOutDir, "server/image-encoder.cjs"),
+          'module.exports = (source) => "transformed:" + source.toString("base64");\n',
+        );
+        return (await startProdServer({ port: 0, host: "127.0.0.1", outDir: buildOutDir })).server;
+      };
+      server = await buildServer("configured", path.join(fixtureDir, "dist"));
       baseUrl = serverOrigin(server);
     }, 120000);
 
@@ -174,6 +211,7 @@ describe.each(["app", "pages"] as const)(
       await closeServer(server);
       await closeServer(upstream);
       setImageOptimizer(null);
+      Reflect.deleteProperty(globalThis, Symbol.for(optimizerKey));
       if (fixtureDir) await fs.rm(fixtureDir, { recursive: true, force: true });
     });
 
@@ -262,7 +300,7 @@ describe.each(["app", "pages"] as const)(
     );
 
     it("rejects denied, unsuccessful and non-image API sources before transformation", async () => {
-      const optimizer = getImageOptimizer();
+      const optimizer = fixtureOptimizer();
       expect(optimizer).not.toBeNull();
       const transform = vi.spyOn(optimizer!, "transformImage");
       try {
@@ -284,7 +322,7 @@ describe.each(["app", "pages"] as const)(
     });
 
     it("rejects unsuccessful and non-image rewrite sources before transformation", async () => {
-      const optimizer = getImageOptimizer();
+      const optimizer = fixtureOptimizer();
       expect(optimizer).not.toBeNull();
       const transform = vi.spyOn(optimizer!, "transformImage");
       try {
@@ -304,8 +342,67 @@ describe.each(["app", "pages"] as const)(
       }
     });
 
+    it.each(["none", "throws"] as const)(
+      "does not inherit a previous server optimizer when the new adapter is %s",
+      async (mode) => {
+        const other = await buildServer(mode, path.join(fixtureDir!, `dist-${mode}`));
+        try {
+          const response = await fetch(
+            `${serverOrigin(other)}/_next/image?url=%2Flocal.png&w=64&q=75`,
+          );
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toBe("image/png");
+          expect(Buffer.from(await response.arrayBuffer())).toEqual(SOURCE_PNG);
+          const original = await fetch(`${baseUrl}/_next/image?url=%2Flocal.png&w=64&q=75`, {
+            headers: { Accept: "image/webp" },
+          });
+          expect(await original.text()).toBe(`transformed:${SOURCE_PNG.toString("base64")}`);
+        } finally {
+          await closeServer(other);
+        }
+      },
+      120000,
+    );
+
+    it("keeps the configured optimizer when starting the same entry again", async () => {
+      const { server: other } = await startProdServer({
+        port: 0,
+        host: "127.0.0.1",
+        outDir: path.join(fixtureDir!, "dist"),
+      });
+      try {
+        const response = await fetch(
+          `${serverOrigin(other)}/_next/image?url=%2Flocal.png&w=64&q=75`,
+          { headers: { Accept: "image/webp" } },
+        );
+        expect(await response.text()).toBe(`transformed:${SOURCE_PNG.toString("base64")}`);
+      } finally {
+        await closeServer(other);
+      }
+    });
+
+    it("preserves an imperative default for a server without configured images", async () => {
+      const previous = getImageOptimizer();
+      setImageOptimizer({
+        transformImage: async () =>
+          new Response("manual image", { headers: { "Content-Type": "image/webp" } }),
+      });
+      let other: Server | undefined;
+      try {
+        other = await buildServer("none", path.join(fixtureDir!, "dist-manual"));
+        const response = await fetch(
+          `${serverOrigin(other)}/_next/image?url=%2Flocal.png&w=64&q=75`,
+          { headers: { Accept: "image/webp" } },
+        );
+        expect(await response.text()).toBe("manual image");
+      } finally {
+        await closeServer(other);
+        setImageOptimizer(previous);
+      }
+    }, 120000);
+
     it("passes through public and rewrite images when no optimizer is active", async () => {
-      const configuredOptimizer = getImageOptimizer();
+      const configuredOptimizer = fixtureOptimizer();
       setImageOptimizer(null);
       try {
         for (const source of [
@@ -329,6 +426,10 @@ describe.each(["app", "pages"] as const)(
       } finally {
         setImageOptimizer(configuredOptimizer);
       }
+      const restored = await fetch(`${baseUrl}/_next/image?url=%2Flocal.png&w=64&q=75`, {
+        headers: { Accept: "image/webp" },
+      });
+      expect(await restored.text()).toBe(`transformed:${SOURCE_PNG.toString("base64")}`);
     });
   },
 );
