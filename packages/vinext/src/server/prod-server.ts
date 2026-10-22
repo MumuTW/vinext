@@ -34,6 +34,9 @@ import {
   IMAGE_CONTENT_SECURITY_POLICY,
   IMAGE_RESPONSE_CACHE_STATE,
   INVALID_IMAGE_SOURCE_MESSAGE,
+  getImageOptimizer,
+  handleConfiguredImageOptimization,
+  invalidImageSourceResponse,
   parseImageParams,
   isImageSourceBodyStatus,
   isSafeImageContentType,
@@ -422,8 +425,8 @@ function nodeHeadersToWebHeaders(headersRecord: IncomingMessage["headers"]): Hea
 
 const NO_BODY_RESPONSE_STATUSES = new Set([204, 205, 304]);
 
-// The Node server passes `/_next/image` sources through unoptimized and keeps
-// no image cache, so every image it sends is a fresh response. Sent only with
+// Unoptimized `/_next/image` passthrough keeps no image cache, so every image
+// it sends is a fresh response. Sent only with
 // the image bytes: a 304 carries no `x-nextjs-cache` (as in Next.js) or `x-vinext-cache`.
 const IMAGE_REPRESENTATION_HEADERS = buildCacheStateHeaders(IMAGE_RESPONSE_CACHE_STATE);
 
@@ -732,6 +735,59 @@ function staticCacheLookupPath(pathname: string): string | null {
   // Block .vite/ access, also encoded (e.g. /%2Evite/manifest.json)
   if (lookupPath.startsWith("/.vite/") || lookupPath === "/.vite") return null;
   return lookupPath;
+}
+
+/** Read only files admitted to the static cache, never a request-derived disk path. */
+function readCachedImageSource(
+  cache: StaticFileCache,
+  pathname: string,
+  signal: AbortSignal,
+): Response {
+  const lookupPath = staticCacheLookupPath(pathname);
+  const file = lookupPath === null ? undefined : cache.lookup(lookupPath)?.original;
+  if (!file) return invalidImageSourceResponse();
+  const body = file.buffer
+    ? new Uint8Array(file.buffer)
+    : (Readable.toWeb(fs.createReadStream(file.path, { signal })) as ReadableStream<Uint8Array>);
+  return new Response(body, { headers: { "Content-Type": file.headers["Content-Type"] } });
+}
+
+async function serveNodeImageOptimization(
+  req: IncomingMessage,
+  res: ServerResponse,
+  request: Request,
+  fetchSource: () => Response | Promise<Response>,
+  allowedWidths: number[],
+  imageConfig: ImageConfig | undefined,
+): Promise<void> {
+  const response = await handleConfiguredImageOptimization(
+    request,
+    async () => {
+      const source = await fetchSource();
+      if (
+        !isImageSourceBodyStatus(source.status) ||
+        !source.body ||
+        !isSafeImageContentType(
+          source.headers.get("Content-Type"),
+          imageConfig?.dangerouslyAllowSVG,
+        )
+      ) {
+        cancelResponseBody(source);
+        return invalidImageSourceResponse();
+      }
+      // Source response cookies and cache policy do not belong to the image.
+      return new Response(source.body, {
+        headers: { "Content-Type": source.headers.get("Content-Type")! },
+      });
+    },
+    allowedWidths,
+    imageConfig,
+  );
+  if (request.signal.aborted) {
+    cancelResponseBody(response, request.signal.reason);
+    return;
+  }
+  await sendWebResponse(response, req, res, false);
 }
 
 /** Pathnames the Pages Router serves from routes rather than the client directory. */
@@ -1840,6 +1896,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   // instance, and only cache-busts when this function runs again after a
   // rebuild to the same path (e.g. across test describe blocks).
   const rscModule = await importServerEntryModule(rscEntryPath);
+  rscModule.__registerConfiguredImageOptimizer?.();
   const rscEntryRequire = createServerEntryRequire(rscEntryPath);
   const rscHandler = resolveAppRouterHandler(rscModule.default);
   const workerEntry =
@@ -1934,10 +1991,8 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   // .br/.gz/.zst variants (generated at build time) are detected automatically.
   const staticCache = await StaticFileCache.create(clientDir);
 
-  // Image optimization passthrough (Node.js prod server has no Images binding;
-  // serves the original file with cache headers and security headers). Runs
-  // only after the RSC handler admitted the endpoint through middleware and
-  // rewrites, whose response headers Next.js also sends with the image.
+  // Runs only after the RSC handler admitted the endpoint through middleware
+  // and rewrites. Use the configured transform backend on Node too.
   const serveImageOptimization = async (
     req: IncomingMessage,
     res: ServerResponse,
@@ -1951,6 +2006,10 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     for (const [name, value] of Object.entries(stagedHeaders)) {
       res.setHeader(name, value);
     }
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      sendStaticMethodNotAllowed(res);
+      return;
+    }
     // The query middleware and rewrites selected, which the handler validated.
     const parsedUrl = new URL(`/${signal.search}`, "http://localhost");
     const params = parseImageParams(parsedUrl, appImageAllowedWidths, imageConfig?.qualities);
@@ -1959,6 +2018,12 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
       res.end("Bad Request");
       return;
     }
+    const imageUrl = new URL(request.url);
+    imageUrl.search = signal.search;
+    const imageRequest = new Request(imageUrl, {
+      headers: signal.requestHeaders ?? request.headers,
+      signal: request.signal,
+    });
     // Block SVG and other unsafe content types by checking the file extension
     // of the file actually served, not the `url` text, whose query or hash
     // could carry an image extension. SVG is only allowed when
@@ -1977,8 +2042,21 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
       "Content-Disposition":
         imageConfig?.contentDispositionType === "attachment" ? "attachment" : "inline",
     };
-    const serveSource = (sourcePath: string): Promise<boolean> =>
-      tryServeStatic(
+    const serveSource = async (sourcePath: string): Promise<boolean> => {
+      if (getImageOptimizer() !== null) {
+        const lookupPath = staticCacheLookupPath(sourcePath);
+        if (lookupPath === null || !staticCache.lookup(lookupPath)) return false;
+        await serveNodeImageOptimization(
+          req,
+          res,
+          imageRequest,
+          () => readCachedImageSource(staticCache, sourcePath, request.signal),
+          appImageAllowedWidths,
+          imageConfig,
+        );
+        return true;
+      }
+      return tryServeStatic(
         req,
         res,
         clientDir,
@@ -1989,6 +2067,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
         undefined,
         IMAGE_REPRESENTATION_HEADERS,
       );
+    };
 
     // Serve the source only as an anonymous direct request would receive it.
     // Build assets bypass middleware there too.
@@ -2011,20 +2090,25 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
 
     // Any other source goes through the application pipeline as a GET without
     // the caller's headers, like Next.js' fetchInternalImage, so middleware
-    // admits it. Only a public file that pipeline selects is served.
+    // admits it. A configured external rewrite may supply the image body.
     if (sourcePathname !== null) {
-      const sourceResponse = await rscHandler(
-        new Request(sourceUrl, { signal: request.signal }),
-        createNodeExecutionContext(resolveTrustedNodeRevalidateOrigin(req, host, port), {
-          middlewareOrigin: resolveNodeMiddlewareOrigin(req, request.url, host, port),
-        }),
-      );
+      const fetchSource = () =>
+        rscHandler(
+          new Request(sourceUrl, { signal: request.signal }),
+          createNodeExecutionContext(resolveTrustedNodeRevalidateOrigin(req, host, port), {
+            middlewareOrigin: resolveNodeMiddlewareOrigin(req, request.url, host, port),
+          }),
+        );
+      const sourceResponse = await fetchSource();
       const sourceSignal = isImageSourceBodyStatus(sourceResponse.status)
         ? readStaticFileSignal(sourceResponse)
         : null;
-      cancelResponseBody(sourceResponse, request.signal.reason);
-      if (request.signal.aborted) return;
+      if (request.signal.aborted) {
+        cancelResponseBody(sourceResponse, request.signal.reason);
+        return;
+      }
       if (sourceSignal !== null) {
+        cancelResponseBody(sourceResponse);
         let sourcePath = sourceSignal;
         try {
           sourcePath = decodeURIComponent(sourceSignal);
@@ -2037,6 +2121,21 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
           return;
         }
         if (await serveSource(sourcePath)) return;
+      } else {
+        let pendingSource: Response | undefined = sourceResponse;
+        await serveNodeImageOptimization(
+          req,
+          res,
+          imageRequest,
+          () => {
+            const source = pendingSource;
+            pendingSource = undefined;
+            return source ?? fetchSource();
+          },
+          appImageAllowedWidths,
+          imageConfig,
+        );
+        return;
       }
     }
     res.writeHead(400);
@@ -2380,6 +2479,9 @@ async function createPagesRouterRequestHandler(
   // module instance, and only cache-busts when this function runs again after
   // a rebuild to the same output path.
   const serverEntry = await importServerEntryModule(serverEntryPath);
+  // The built-in image endpoint does not render a page before it needs the
+  // adapter. Keep initialization on the Node host so Workers can supply env.
+  serverEntry.__registerConfiguredImageOptimizer?.();
   const serverEntryRequire = createServerEntryRequire(serverEntryPath);
   const {
     renderPage,
@@ -2698,9 +2800,9 @@ async function createPagesRouterRequestHandler(
           ? (request, _ctx, opts) => runMiddleware(request, middlewareCtx, opts)
           : null;
 
-      // The public file the pipeline serves for an anonymous GET of an image
-      // source, or null when middleware, a redirect, or a route answers it.
-      const resolvePublicImageSource = async (sourceUrl: URL): Promise<string | null> => {
+      // Resolve an anonymous source GET through middleware and rewrites. Keep
+      // a selected public file's path for the static passthrough fast path.
+      const resolveImageSource = async (sourceUrl: URL): Promise<string | Response | null> => {
         const rawSourcePathname = sourceUrl.pathname;
         if (
           getRepeatedSlashRedirect(rawSourcePathname) ||
@@ -2766,6 +2868,9 @@ async function createPagesRouterRequestHandler(
           },
         );
         if (result.type !== "response") return null;
+        if (sourcePath === null && isImageSourceBodyStatus(result.response.status)) {
+          return result.response;
+        }
         cancelResponseBody(result.response);
         return isImageSourceBodyStatus(result.response.status) ? sourcePath : null;
       };
@@ -2859,6 +2964,10 @@ async function createPagesRouterRequestHandler(
             for (const [name, value] of Object.entries(stagedHeaders)) {
               res.setHeader(name, value);
             }
+            if (req.method !== "GET" && req.method !== "HEAD") {
+              sendStaticMethodNotAllowed(res);
+              return true;
+            }
             const parsedUrl = new URL(resolvedUrl, "http://localhost");
             const params = parseImageParams(
               parsedUrl,
@@ -2870,6 +2979,10 @@ async function createPagesRouterRequestHandler(
               res.end("Bad Request");
               return true;
             }
+            const imageRequest = new Request(new URL(resolvedUrl, webRequest.url), {
+              headers: _request.headers,
+              signal: webRequest.signal,
+            });
             // Check the extension of the file actually served, not the `url`
             // text, whose query or hash could carry an image extension.
             const sendUnsafeContentType = () => {
@@ -2888,8 +3001,21 @@ async function createPagesRouterRequestHandler(
               "Content-Disposition":
                 pagesImageConfig?.contentDispositionType === "attachment" ? "attachment" : "inline",
             };
-            const serveSource = (sourcePath: string): Promise<boolean> =>
-              tryServeStatic(
+            const serveSource = async (sourcePath: string): Promise<boolean> => {
+              if (getImageOptimizer() !== null) {
+                const lookupPath = staticCacheLookupPath(sourcePath);
+                if (lookupPath === null || !staticCache.lookup(lookupPath)) return false;
+                await serveNodeImageOptimization(
+                  req,
+                  res,
+                  imageRequest,
+                  () => readCachedImageSource(staticCache, sourcePath, webRequest.signal),
+                  allowedImageWidths,
+                  pagesImageConfig,
+                );
+                return true;
+              }
+              return tryServeStatic(
                 req,
                 res,
                 clientDir,
@@ -2900,6 +3026,7 @@ async function createPagesRouterRequestHandler(
                 undefined,
                 IMAGE_REPRESENTATION_HEADERS,
               );
+            };
 
             // Serve the source only as an anonymous direct request would
             // receive it. Build assets bypass middleware there too.
@@ -2924,17 +3051,38 @@ async function createPagesRouterRequestHandler(
 
             // Any other source goes through the pipeline as a GET without the
             // caller's headers, like Next.js' fetchInternalImage, so middleware
-            // admits it. Only a public file that pipeline selects is served.
-            const sourcePath =
-              sourcePathname !== null ? await resolvePublicImageSource(sourceUrl) : null;
-            if (webRequest.signal.aborted) return true;
-            if (sourcePath !== null) {
+            // admits it. A configured external rewrite may supply the body.
+            const source = sourcePathname !== null ? await resolveImageSource(sourceUrl) : null;
+            if (webRequest.signal.aborted) {
+              if (source instanceof Response) cancelResponseBody(source, webRequest.signal.reason);
+              return true;
+            }
+            if (typeof source === "string") {
               // Middleware can rewrite the source to a file of another type.
-              if (!isSafeSourcePath(staticCacheLookupPath(sourcePath) ?? sourcePath)) {
+              if (!isSafeSourcePath(staticCacheLookupPath(source) ?? source)) {
                 sendUnsafeContentType();
                 return true;
               }
-              if (await serveSource(sourcePath)) return true;
+              if (await serveSource(source)) return true;
+            } else if (source instanceof Response) {
+              let pendingSource: Response | undefined = source;
+              await serveNodeImageOptimization(
+                req,
+                res,
+                imageRequest,
+                async () => {
+                  const initial = pendingSource;
+                  pendingSource = undefined;
+                  if (initial) return initial;
+                  const next = await resolveImageSource(sourceUrl);
+                  return typeof next === "string"
+                    ? readCachedImageSource(staticCache, next, webRequest.signal)
+                    : (next ?? invalidImageSourceResponse());
+                },
+                allowedImageWidths,
+                pagesImageConfig,
+              );
+              return true;
             }
             res.writeHead(400);
             res.end(INVALID_IMAGE_SOURCE_MESSAGE);
