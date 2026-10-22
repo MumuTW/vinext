@@ -92,9 +92,10 @@ export function createOgInlineFetchAssetsPlugin(): Plugin {
       if (!ownership.shouldTrackImport(source)) return null;
 
       const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
-      if (resolved === null || resolved.external) return null;
+      if (resolved === null || resolved.external) return resolved;
       await ownership.recordResolvedImport(source, resolved.id);
-      return null;
+      // Reuse the full result instead of running the remaining resolvers again.
+      return resolved;
     },
 
     transform: {
