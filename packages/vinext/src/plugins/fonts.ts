@@ -96,13 +96,6 @@ const GOOGLE_FONT_UTILITY_EXPORTS = new Set([
  */
 const VINEXT_FONT_URL_NAMESPACE = "_vinext_fonts";
 const MAX_GOOGLE_FONTS_ERROR_BODY_LENGTH = 500;
-const FONT_FORMAT_EXTENSIONS = new Map([
-  ["woff", "woff"],
-  ["woff2", "woff2"],
-  ["truetype", "ttf"],
-  ["opentype", "otf"],
-  ["embedded-opentype", "eot"],
-]);
 
 /**
  * Stands in for the font cache directory in every `url()` of a cached
@@ -121,11 +114,9 @@ const CACHED_FONT_DIR_TOKEN = "__VINEXT_FONT_CACHE_DIR__";
  * The suffix ties the cache to that format: a `style.css` written by an
  * earlier vinext holds the writing checkout's absolute paths, which would
  * 404 once embedded, so it is never read and the font is fetched again.
- * Change the suffix whenever the cached CSS format changes. The current
- * version also refetches stylesheets that mislabeled extensionless WOFF2
- * downloads as TTF, so their served and preload MIME types are corrected.
+ * Change the suffix whenever the cached CSS format changes.
  */
-const CACHED_FONT_CSS_FILE = "style-formats-v2.css";
+const CACHED_FONT_CSS_FILE = "style-q7f3kd.css";
 
 function formatGoogleFontsErrorBody(body: string): string {
   const trimmed = body.trim();
@@ -526,25 +517,13 @@ async function downloadGoogleFont(
     throw new Error(`Google Fonts returned an empty stylesheet: ${cssUrl}`);
   }
 
-  // Extract all font file URLs
-  const urlRe = /url\((https:\/\/fonts\.gstatic\.com\/[^)]+)\)(?:\s+format\(['"]([^'"]+)['"]\))?/g;
+  // Extract all font file URLs. The extension comes from the shared Next.js
+  // port, which also resolves extensionless `/l/font?kit=...` URLs.
   const urls = new Map<string, string>(); // original URL -> local filename
-  let urlMatch;
-  while ((urlMatch = urlRe.exec(css)) !== null) {
-    const fontUrl = urlMatch[1];
-    if (!urls.has(fontUrl)) {
-      // Google can return extensionless /l/font?kit=... URLs. Match Next.js:
-      // prefer the pathname extension, then the CSS format hint, then WOFF2
-      // (the format requested by our Chrome user agent). Query values must
-      // not influence the extension used for asset and preload MIME types.
-      // https://github.com/vercel/next.js/blob/98a73ead5bf711183e07398983c5c943f86328e7/packages/font/src/google/find-font-files-in-css.ts
-      const ext =
-        /\.(woff2?|eot|ttf|otf)$/.exec(new URL(fontUrl).pathname)?.[1] ??
-        FONT_FORMAT_EXTENSIONS.get(urlMatch[2] ?? "") ??
-        "woff2";
-      const fileHash = createHash("md5").update(fontUrl).digest("hex").slice(0, 8);
-      urls.set(fontUrl, `${family.toLowerCase().replace(/\s+/g, "-")}-${fileHash}.${ext}`);
-    }
+  for (const { googleFontFileUrl: fontUrl, ext } of findFontFilesInCss(css)) {
+    if (!fontUrl.startsWith("https://fonts.gstatic.com/")) continue;
+    const fileHash = createHash("md5").update(fontUrl).digest("hex").slice(0, 8);
+    urls.set(fontUrl, `${family.toLowerCase().replace(/\s+/g, "-")}-${fileHash}.${ext}`);
   }
 
   // Download font files
@@ -781,7 +760,8 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
           if (err || !stat.isFile()) return next();
           const ext = path.extname(filePath).toLowerCase();
           // CONTENT_TYPES is the same map prod-server uses, so fonts get
-          // identical MIME types in dev and prod for all downloaded formats.
+          // identical MIME types in dev and prod. fetchAndCacheFont only
+          // ever writes .woff2/.woff/.ttf/.otf/.eot, all of which are covered.
           res.setHeader("Content-Type", CONTENT_TYPES[ext] ?? "application/octet-stream");
           res.setHeader("Cache-Control", "no-cache");
           res.setHeader("Access-Control-Allow-Origin", "*");

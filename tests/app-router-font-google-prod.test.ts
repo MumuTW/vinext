@@ -33,6 +33,13 @@ describe("App Router Production server self-hosted next/font/google headers", ()
   const nodeModulesLink = path.join(FONT_FIXTURE_DIR, "node_modules");
   let fontServer: import("node:http").Server | undefined;
   let fontBaseUrl: string;
+  // Google can serve WOFF2 from an extensionless `/l/font?kit=...` URL.
+  // Geist Mono uses the URL from Next.js's extensionless fixture:
+  // https://github.com/vercel/next.js/blob/98a73ead5bf711183e07398983c5c943f86328e7/test/e2e/app-dir/next-font-extensionless/google-font-mocked-responses.js
+  const extensionlessFontUrl = "https://fonts.gstatic.com/l/font?kit=a%2Bb%25c=d&skey=test&v=v20";
+  const fontDownloads: string[] = [];
+  const mockFontBytes = (url: string) =>
+    new Uint8Array([0x77, 0x4f, 0x46, 0x32, ...new TextEncoder().encode(url)]);
 
   beforeAll(async () => {
     // Start from a clean slate so the test deterministically exercises
@@ -82,7 +89,9 @@ describe("App Router Production server self-hosted next/font/google headers", ()
       if (url.includes("fonts.googleapis.com")) {
         const isMono = url.includes("Geist+Mono") || url.includes("Geist%20Mono");
         const family = isMono ? "Geist Mono" : "Geist";
-        const gstaticUrl = `https://fonts.gstatic.com/s/${isMono ? "geistmono" : "geist"}/v1/${isMono ? "geistmono" : "geist"}-latin.woff2`;
+        const gstaticUrl = isMono
+          ? extensionlessFontUrl
+          : "https://fonts.gstatic.com/s/geist/v1/geist-latin.woff2";
         const css = [
           "/* latin */",
           "@font-face {",
@@ -100,14 +109,14 @@ describe("App Router Production server self-hosted next/font/google headers", ()
         });
       }
       if (url.includes("fonts.gstatic.com")) {
-        // 16 bytes is plenty — the plugin writes whatever it gets to disk
-        // under `.vinext/fonts/<family>/<hash>.woff2`. The test never reads
-        // the contents back, it only asserts the file exists and serves
-        // with the right content-type.
-        return new Response(
-          new Uint8Array([0x77, 0x4f, 0x46, 0x32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-          { status: 200, headers: { "content-type": "font/woff2" } },
-        );
+        // The plugin writes whatever it gets to disk under
+        // `.vinext/fonts/<family>/`. Embedding the URL in the bytes lets the
+        // tests tie each served file back to the upstream URL it came from.
+        fontDownloads.push(url);
+        return new Response(mockFontBytes(url), {
+          status: 200,
+          headers: { "content-type": "font/woff2" },
+        });
       }
       return originalFetch(input as RequestInfo, init);
     };
@@ -230,6 +239,35 @@ describe("App Router Production server self-hosted next/font/google headers", ()
       expect(styleMatch![1]).toContain(href);
       expect(preloadHrefs).toContain(href);
     }
+  });
+
+  it("self-hosts an extensionless Google font URL as WOFF2 with matching preloads", async () => {
+    // Ported from Next.js:
+    // https://github.com/vercel/next.js/blob/98a73ead5bf711183e07398983c5c943f86328e7/test/e2e/app-dir/next-font-extensionless/next-font-extensionless.test.ts
+    expect(fontDownloads).toContain(extensionlessFontUrl);
+
+    const res = await fetch(`${fontBaseUrl}/`);
+    const html = await res.text();
+    const preload = html.match(
+      /<link rel="preload"[^>]*href="(\/_next\/static\/_vinext_fonts\/geist-mono-[^"]+)"[^>]*>/,
+    );
+    expect(preload).not.toBeNull();
+    const href = preload![1];
+    expect(href).toMatch(/\.woff2$/);
+    expect(preload![0]).toContain('type="font/woff2"');
+    expect(res.headers.get("link")).toContain(`<${href}>; rel=preload; as=font; type=font/woff2`);
+
+    const styleContent = html.match(/<style data-vinext-fonts[^>]*>([\s\S]*?)<\/style>/)![1];
+    expect(styleContent).toContain(`url(${href}) format('woff2')`);
+    expect(styleContent).not.toContain("/l/font?");
+    expect(styleContent).not.toContain("fonts.gstatic.com");
+
+    const fontRes = await fetch(`${fontBaseUrl}${href}`);
+    expect(fontRes.status).toBe(200);
+    expect(fontRes.headers.get("content-type")).toBe("font/woff2");
+    expect(new Uint8Array(await fontRes.arrayBuffer())).toEqual(
+      mockFontBytes(extensionlessFontUrl),
+    );
   });
 
   it("emits served URLs in the injected <style data-vinext-fonts> block", async () => {
