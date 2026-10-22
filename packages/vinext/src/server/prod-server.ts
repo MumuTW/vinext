@@ -2985,7 +2985,10 @@ async function createPagesRouterRequestHandler(
           // dispatching the built-in image endpoint, which it serves only
           // under the basePath, including when a rewrite targets it there.
           if (resolvedPathnameHasBasePath && isImageOptimizationPath(requestPathname)) {
-            for (const [name, value] of Object.entries(stagedHeaders)) {
+            // The image response determines its own representation headers.
+            for (const [name, value] of Object.entries(
+              omitHeadersCaseInsensitive(stagedHeaders, OMIT_STATIC_RESPONSE_HEADERS),
+            )) {
               res.setHeader(name, value);
             }
             if (req.method !== "GET" && req.method !== "HEAD") {

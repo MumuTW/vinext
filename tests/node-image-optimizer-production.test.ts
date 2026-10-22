@@ -115,6 +115,12 @@ describe.each(["app", "pages"] as const)(
            if (request.nextUrl.pathname === "/api/image" && request.nextUrl.searchParams.get("kind") === "blocked") {
              return new Response("Image source denied", { status: 403 });
            }
+           if (request.nextUrl.pathname === "/_next/image" && request.nextUrl.searchParams.get("dpl") === "staged-middleware") {
+             const response = NextResponse.next();
+             response.headers.set("Content-Length", "3");
+             response.headers.set("X-Image-Header", "middleware");
+             return response;
+           }
            return NextResponse.next();
          }\n`,
       );
@@ -126,6 +132,14 @@ describe.each(["app", "pages"] as const)(
       await fs.writeFile(
         path.join(fixtureDir, "next.config.mjs"),
         `export default {
+        headers: async () => [{
+          source: "/_next/image",
+          has: [{ type: "query", key: "dpl", value: "staged-config" }],
+          headers: [
+            { key: "Content-Length", value: "3" },
+            { key: "X-Image-Header", value: "config" },
+          ],
+        }],
         rewrites: async () => [
           { source: "/media/:path*", destination: ${JSON.stringify(upstreamUrl)} + "/:path*" },
           { source: "/generated-image", destination: "/api/image" },
@@ -240,6 +254,35 @@ describe.each(["app", "pages"] as const)(
       expect(post.status).toBe(405);
       expect(post.headers.get("allow")).toBe("GET, HEAD");
     });
+
+    // Next.js derives image Content-Length from the transformed bytes:
+    // https://github.com/vercel/next.js/blob/7657545d157a04c3b21112f08e4675a4ebffeb5a/packages/next/src/server/image-optimizer.ts#L1173-L1187
+    // App's image signal currently forwards only middleware headers.
+    it.each(
+      ["/local.png", "/media/banner.png", "/api/image", "/generated-image"].flatMap((source) =>
+        (router === "pages" ? ["config", "middleware"] : ["middleware"]).map((staging) => ({
+          source,
+          staging,
+        })),
+      ),
+    )(
+      "does not truncate optimized source $source with $staging content length",
+      async ({ source, staging }) => {
+        // dpl is an accepted optimizer query parameter. Keep these staged
+        // headers on the endpoint request, never its anonymous source GET.
+        const response = await fetch(
+          `${baseUrl}/_next/image?url=${encodeURIComponent(source)}&w=64&q=75&dpl=staged-${staging}`,
+          { headers: { Accept: "image/webp", Connection: "close" } },
+        );
+        const body = await response.text();
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toBe("image/webp");
+        expect(response.headers.get("x-image-header")).toBe(staging);
+        expect(body).toBe(`transformed:${SOURCE_PNG.toString("base64")}`);
+        expect(response.headers.get("content-length")).not.toBe("3");
+      },
+    );
 
     // Ported from Next.js: test/e2e/image-optimizer/image-optimizer.test.ts
     // https://github.com/vercel/next.js/blob/7657545d157a04c3b21112f08e4675a4ebffeb5a/test/e2e/image-optimizer/image-optimizer.test.ts#L444
