@@ -42,7 +42,7 @@ describe.each(["app", "pages"] as const)(
       setImageOptimizer(null);
       upstream = createServer((req, res) => {
         upstreamCredentials.push(Boolean(req.headers.cookie || req.headers.authorization));
-        if (req.url === "/not-image.png") {
+        if (req.url?.startsWith("/not-image")) {
           res.writeHead(200, { "Content-Type": "text/html" });
           res.end("not an image");
         } else {
@@ -165,34 +165,40 @@ describe.each(["app", "pages"] as const)(
 
     // Ported from Next.js: test/e2e/image-optimizer/image-optimizer.test.ts
     // https://github.com/vercel/next.js/blob/7657545d157a04c3b21112f08e4675a4ebffeb5a/test/e2e/image-optimizer/image-optimizer.test.ts#L444
-    it("optimizes an image served through an external rewrite", async () => {
-      const direct = await fetch(`${baseUrl}/media/banner.png`);
-      const directBody = Buffer.from(await direct.arrayBuffer());
-      expect(direct.status).toBe(200);
-      expect(directBody).toEqual(SOURCE_PNG);
+    it.each(["banner.png", "banner", "banner.bin"])(
+      "optimizes external rewrite source %s using its response content type",
+      async (source) => {
+        const direct = await fetch(`${baseUrl}/media/${source}`);
+        const directBody = Buffer.from(await direct.arrayBuffer());
+        expect(direct.status).toBe(200);
+        expect(directBody).toEqual(SOURCE_PNG);
 
-      upstreamCredentials.length = 0;
-      const response = await fetch(`${baseUrl}/_next/image?url=%2Fmedia%2Fbanner.png&w=64&q=75`, {
-        headers: {
-          Accept: "image/webp",
-          Cookie: "fixture=caller",
-          Authorization: "Bearer fixture",
-        },
-      });
-      const body = await response.text();
+        upstreamCredentials.length = 0;
+        const response = await fetch(
+          `${baseUrl}/_next/image?url=${encodeURIComponent(`/media/${source}`)}&w=64&q=75`,
+          {
+            headers: {
+              Accept: "image/webp",
+              Cookie: "fixture=caller",
+              Authorization: "Bearer fixture",
+            },
+          },
+        );
+        const body = await response.text();
 
-      expect(response.status, body).toBe(200);
-      expect(response.headers.get("content-type")).toBe("image/webp");
-      expect(body).toBe(`transformed:${SOURCE_PNG.toString("base64")}`);
-      expect(upstreamCredentials).toEqual([false]);
-    });
+        expect(response.status, body).toBe(200);
+        expect(response.headers.get("content-type")).toBe("image/webp");
+        expect(body).toBe(`transformed:${SOURCE_PNG.toString("base64")}`);
+        expect(upstreamCredentials).toEqual([false]);
+      },
+    );
 
     it("rejects unsuccessful and non-image rewrite sources before transformation", async () => {
       const optimizer = getImageOptimizer();
       expect(optimizer).not.toBeNull();
       const transform = vi.spyOn(optimizer!, "transformImage");
       try {
-        for (const source of ["missing.png", "not-image.png"]) {
+        for (const source of ["missing.png", "not-image.png", "not-image", "not-image.bin"]) {
           const response = await fetch(
             `${baseUrl}/_next/image?url=${encodeURIComponent(`/media/${source}`)}&w=64&q=75`,
           );
@@ -212,7 +218,12 @@ describe.each(["app", "pages"] as const)(
       const configuredOptimizer = getImageOptimizer();
       setImageOptimizer(null);
       try {
-        for (const source of ["/local.png", "/media/banner.png"]) {
+        for (const source of [
+          "/local.png",
+          "/media/banner.png",
+          "/media/banner",
+          "/media/banner.bin",
+        ]) {
           const response = await fetch(
             `${baseUrl}/_next/image?url=${encodeURIComponent(source)}&w=64&q=75`,
             { headers: { Accept: "image/webp" } },

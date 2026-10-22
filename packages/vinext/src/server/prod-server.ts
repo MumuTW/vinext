@@ -2045,9 +2045,13 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
         imageConfig?.contentDispositionType === "attachment" ? "attachment" : "inline",
     };
     const serveSource = async (sourcePath: string): Promise<boolean> => {
+      const lookupPath = staticCacheLookupPath(sourcePath);
+      if (lookupPath === null || !staticCache.lookup(lookupPath)) return false;
+      if (!isSafeSourcePath(lookupPath)) {
+        sendUnsafeContentType();
+        return true;
+      }
       if (getImageOptimizer() !== null) {
-        const lookupPath = staticCacheLookupPath(sourcePath);
-        if (lookupPath === null || !staticCache.lookup(lookupPath)) return false;
         await serveNodeImageOptimization(
           req,
           res,
@@ -2079,10 +2083,6 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
       sourcePathname = normalizePath(normalizePathnameForRouteMatchStrict(sourceUrl.pathname));
     } catch {
       // A malformed source is never served.
-    }
-    if (!isSafeSourcePath(sourcePathname ?? params.imageUrl)) {
-      sendUnsafeContentType();
-      return;
     }
     const assetLookupPath =
       sourcePathname !== null
@@ -3006,9 +3006,13 @@ async function createPagesRouterRequestHandler(
                 pagesImageConfig?.contentDispositionType === "attachment" ? "attachment" : "inline",
             };
             const serveSource = async (sourcePath: string): Promise<boolean> => {
+              const lookupPath = staticCacheLookupPath(sourcePath);
+              if (lookupPath === null || !staticCache.lookup(lookupPath)) return false;
+              if (!isSafeSourcePath(lookupPath)) {
+                sendUnsafeContentType();
+                return true;
+              }
               if (getImageOptimizer() !== null) {
-                const lookupPath = staticCacheLookupPath(sourcePath);
-                if (lookupPath === null || !staticCache.lookup(lookupPath)) return false;
                 await serveNodeImageOptimization(
                   req,
                   res,
@@ -3042,10 +3046,6 @@ async function createPagesRouterRequestHandler(
               );
             } catch {
               // A malformed source is never served.
-            }
-            if (!isSafeSourcePath(sourcePathname ?? params.imageUrl)) {
-              sendUnsafeContentType();
-              return true;
             }
             const assetLookupPath =
               sourcePathname !== null
