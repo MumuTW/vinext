@@ -1,5 +1,40 @@
 # vinext
 
+## 1.3.1
+
+### Bug Fixes
+
+#### App Router
+
+- render a sibling intercepting route's own forbidden and unauthorized (#4169)
+- catch a parallel slot layout's notFound() above the layout rendering it (#4167)
+- reset a segment's error boundary on a pathname change (#4166)
+- stream client components that await at their top level (#4135)
+- commit server-component HMR updates as transitions (#4164)
+- catch a parallel slot's notFound() above its layout in the document (#4155)
+- render a sibling intercepting route's own not-found (#4157)
+- clear access boundaries on pathname change under intercepted routes (#4156)
+- render built-in forbidden and unauthorized pages (#4154)
+- commit search+hash and prefetched navigations as transitions (#4146)
+- wrap every segment's not-found, forbidden and unauthorized boundaries in the tree (#4148)
+- render the boundary above a layout that calls notFound() (#4145)
+- let ancestor layout not-found boundaries catch page signals (#4137)
+- defer full-render link re-prefetches of dynamic routes after cache invalidation (#4136)
+- keep search-transition content on screen during response recovery (#4134)
+
+#### Misc
+
+- **Metadata:** render openGraph emails, phone numbers, fax numbers and alternate locales (#4171)
+- **Config:** honor statusCode on next.config redirects (#4140)
+- **Metadata:** accept a single openGraph video or audio entry like Next.js (#4143)
+- **CLI:** default NODE_ENV to production in vinext start (#4153)
+
+### Contributors
+
+- @Godsenal
+- @james-elicx
+- @RaphaelFakhri
+
 ## 1.3.0
 
 Read the [Vinext 1.3 release post](https://vinext.dev/blog/vinext-1-3) for the highlights.
@@ -36,7 +71,7 @@ Read the [Vinext 1.3 release post](https://vinext.dev/blog/vinext-1-3) for the h
 - stop prerender servers expiring idle keep-alive sockets (#4119)
 - keep the build ID out of client JS (#4101)
 - cache the Server Actions key and keep build IDs out of client JS (#3784)
-- list Pages routes in _buildManifest.js sortedPages (#4035)
+- list Pages routes in \_buildManifest.js sortedPages (#4035)
 
 #### Config
 
@@ -56,7 +91,7 @@ Read the [Vinext 1.3 release post](https://vinext.dev/blog/vinext-1-3) for the h
 #### Server
 
 - fail `vinext start` when the port is in use (#4073)
-- detect the locale of raw _next/data URLs in NextURL (#4103)
+- detect the locale of raw \_next/data URLs in NextURL (#4103)
 - run JS Server Actions against the final route (#4061)
 - decide progressive actions after late routing (#4037)
 - skip progressive actions for multipart route handlers (#3905)
