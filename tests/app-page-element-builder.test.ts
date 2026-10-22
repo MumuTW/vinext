@@ -1003,7 +1003,7 @@ describe("buildPageElements", () => {
     function InterceptNotFound(): React.ReactNode {
       return React.createElement("p", null, "Intercept not found");
     }
-    const build = async (layoutTreePosition: number, notFoundTreePosition: number) => {
+    const build = async (layoutTreePosition: number, notFoundTreePositions: number[]) => {
       const layoutSegments = ["(.)photo", "[id]"].slice(0, layoutTreePosition);
       const result = await buildPageElements(
         createBaseOptions({
@@ -1018,8 +1018,10 @@ describe("buildPageElements", () => {
             interceptBranchSegments: ["(.)photo", "[id]"],
             interceptLayouts: [createSyntheticPageModule(InterceptLayout)],
             interceptLayoutSegments: [layoutSegments],
-            interceptNotFound: createSyntheticPageModule(InterceptNotFound),
-            interceptNotFoundTreePosition: notFoundTreePosition,
+            interceptNotFounds: notFoundTreePositions.map(() =>
+              createSyntheticPageModule(InterceptNotFound),
+            ),
+            interceptNotFoundTreePositions: notFoundTreePositions,
             interceptPage: createSyntheticPageModule(() => null),
             interceptParams: { id: "1" },
             interceptSlotKey: SIBLING_PAGE_INTERCEPT_SLOT_KEY,
@@ -1042,11 +1044,16 @@ describe("buildPageElements", () => {
     };
 
     // Beside the page, below the (.)photo layout: the layout stays.
-    const beside = await build(1, 2);
+    const beside = await build(1, [2]);
     expect(findElementOfType(beside.layout.props.children, NotFoundBoundary)).toBe(beside.boundary);
     // At (.)photo, above a layout in [id]: that layout is replaced.
-    const above = await build(2, 1);
+    const above = await build(2, [1]);
     expect(findElementOfType(above.boundary.props.children, InterceptLayout)).toBe(above.layout);
+    // With a not-found in both segments, each boundary sits in its own
+    // segment, so the outer one also catches the [id] layout's notFound().
+    const nested = await build(2, [1, 2]);
+    expect(findElementOfType(nested.boundary.props.children, InterceptLayout)).toBe(nested.layout);
+    expect(findElementOfType(nested.layout.props.children, NotFoundBoundary)).not.toBeNull();
   });
 
   it("wraps a sibling intercepting page in its own forbidden and unauthorized boundaries", async () => {
@@ -1082,8 +1089,8 @@ describe("buildPageElements", () => {
           interceptForbiddenTreePosition: 2,
           interceptLayouts: [createSyntheticPageModule(InterceptLayout)],
           interceptLayoutSegments: [["(.)photo"]],
-          interceptNotFound: createSyntheticPageModule(InterceptNotFound),
-          interceptNotFoundTreePosition: 2,
+          interceptNotFounds: [createSyntheticPageModule(InterceptNotFound)],
+          interceptNotFoundTreePositions: [2],
           interceptPage: createSyntheticPageModule(() => null),
           interceptParams: { id: "1" },
           interceptSlotKey: SIBLING_PAGE_INTERCEPT_SLOT_KEY,
@@ -1105,6 +1112,224 @@ describe("buildPageElements", () => {
     const notFound = findElementOfType(forbidden.props.children, NotFoundBoundary);
     if (!notFound) throw new Error("Expected the not-found boundary inside forbidden");
     expect((notFound.props.fallback as React.ReactElement).type).toBe(InterceptNotFound);
+  });
+
+  describe("a sibling intercepting layout that doesn't render the page", () => {
+    // The source route's layouts wait for the page entry's page, which an
+    // intercepting layout renders only through its children.
+    let markSourceLayoutRendered = () => {};
+    function SourceLayout(props: Record<string, unknown>): React.ReactNode {
+      markSourceLayoutRendered();
+      return React.createElement(
+        "section",
+        null,
+        "source layout",
+        props.children as React.ReactNode,
+      );
+    }
+
+    async function renderSourceLayoutBeside(
+      InterceptLayout: unknown,
+      opts: Record<string, unknown> = {},
+    ): Promise<{ errors: unknown[]; finished: Promise<string>; rendered: boolean }> {
+      const result = await buildPageElements(
+        createBaseOptions({
+          route: createSyntheticRoute({
+            layouts: [createSyntheticPageModule(SourceLayout)],
+            layoutTreePositions: [0],
+            page: createSyntheticPageModule(() => null),
+            routeSegments: ["feed"],
+            pattern: "/feed",
+          }),
+          routePath: "/feed/photo/1",
+          opts: {
+            interceptBranchSegments: ["(.)photo", "[id]"],
+            interceptLayouts: [createSyntheticPageModule(InterceptLayout)],
+            interceptLayoutSegments: [["(.)photo"]],
+            interceptPage: createSyntheticPageModule(() => React.createElement("p", null, "item")),
+            interceptParams: { id: "1" },
+            interceptSlotKey: SIBLING_PAGE_INTERCEPT_SLOT_KEY,
+            interceptSourcePageSegments: ["feed", "(.)photo", "[id]"],
+            ...opts,
+          },
+        }),
+      );
+      const record = result as Record<string, React.ReactNode>;
+      const pageEntry = record["page:/feed/photo/1"];
+      const layoutEntry = Object.entries(record).find(([key]) => key.startsWith("layout:"))?.[1];
+      expect(React.isValidElement(layoutEntry)).toBe(true);
+
+      const sourceLayoutRendered = new Promise<boolean>((resolve) => {
+        markSourceLayoutRendered = () => resolve(true);
+      });
+      const { renderToReadableStream } = await import("react-dom/server.edge");
+      const errors: unknown[] = [];
+      const finished = renderToReadableStream(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(React.Suspense, { fallback: null }, pageEntry),
+          layoutEntry,
+        ),
+        { onError: (error: unknown) => void errors.push(error) },
+      ).then(readStreamAsText);
+      const rendered = await Promise.race([
+        sourceLayoutRendered,
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000)),
+      ]);
+      return { errors, finished, rendered };
+    }
+
+    it("lets the source layouts render when the layout throws", async () => {
+      async function InterceptLayout(): Promise<React.ReactNode> {
+        await Promise.resolve();
+        notFound();
+      }
+      const { errors, finished, rendered } = await renderSourceLayoutBeside(InterceptLayout);
+      expect(rendered).toBe(true);
+      expect(await finished).toContain("source layout");
+      expect(errors).toHaveLength(1);
+    });
+
+    it("lets the source layouts render when the layout's element throws first", async () => {
+      function Guard(): React.ReactNode {
+        notFound();
+      }
+      function InterceptLayout(props: Record<string, unknown>): React.ReactNode {
+        return React.createElement(Guard, null, props.children as React.ReactNode);
+      }
+      const { errors, finished, rendered } = await renderSourceLayoutBeside(InterceptLayout);
+      expect(rendered).toBe(true);
+      expect(await finished).toContain("source layout");
+      expect(errors).toHaveLength(1);
+    });
+
+    it("lets the source layouts render when the layout leaves out its children", async () => {
+      function InterceptLayout(): React.ReactNode {
+        return React.createElement("aside", null, "intercept shell");
+      }
+      const { errors, finished, rendered } = await renderSourceLayoutBeside(InterceptLayout);
+      expect(rendered).toBe(true);
+      expect(await finished).toContain("intercept shell");
+      expect(errors).toHaveLength(0);
+    });
+
+    it("lets the source layouts render while the layout suspends inside loading UI", async () => {
+      let resolveLayout!: () => void;
+      const layoutData = new Promise<void>((resolve) => {
+        resolveLayout = resolve;
+      });
+      function InterceptLayout(props: Record<string, unknown>): React.ReactNode {
+        React.use(layoutData);
+        return props.children as React.ReactNode;
+      }
+      function InterceptLoading(): React.ReactNode {
+        return React.createElement("p", null, "intercept loading");
+      }
+      const { finished, rendered } = await renderSourceLayoutBeside(InterceptLayout, {
+        interceptLoadings: [createSyntheticPageModule(InterceptLoading)],
+        interceptLoadingTreePositions: [0],
+      });
+      resolveLayout();
+      expect(rendered).toBe(true);
+      expect(await finished).toContain("item");
+    });
+  });
+
+  it("suspends a sibling intercepting page under its intercepting loading UI", async () => {
+    // The page is invoked ahead of its intercepting layouts, but a use()
+    // suspension still shows the loading.tsx inside them.
+    const pageData = new Promise<string>(() => {});
+    function InterceptPage(): React.ReactNode {
+      return React.createElement("p", null, React.use(pageData));
+    }
+    function InterceptLayout(props: Record<string, unknown>): React.ReactNode {
+      return React.createElement("aside", null, props.children as React.ReactNode);
+    }
+    function InterceptLoading(): React.ReactNode {
+      return React.createElement("p", null, "intercept loading");
+    }
+    const result = await buildPageElements(
+      createBaseOptions({
+        route: createSyntheticRoute({
+          page: createSyntheticPageModule(() => null),
+          routeSegments: ["feed"],
+          pattern: "/feed",
+        }),
+        routePath: "/feed/photo/1",
+        opts: {
+          interceptBranchSegments: ["(.)photo", "[id]"],
+          interceptLayouts: [createSyntheticPageModule(InterceptLayout)],
+          interceptLayoutSegments: [["(.)photo"]],
+          interceptLoadings: [createSyntheticPageModule(InterceptLoading)],
+          interceptLoadingTreePositions: [1],
+          interceptPage: createSyntheticPageModule(InterceptPage),
+          interceptParams: { id: "1" },
+          interceptSlotKey: SIBLING_PAGE_INTERCEPT_SLOT_KEY,
+          interceptSourcePageSegments: ["feed", "(.)photo", "[id]"],
+        },
+      }),
+    );
+    const pageEntry = (result as Record<string, React.ReactNode>)["page:/feed/photo/1"];
+
+    // renderToString renders the nearest Suspense fallback for a suspension.
+    const { renderToString } = await import("react-dom/server");
+    const html = renderToString(React.createElement(React.Fragment, null, pageEntry));
+
+    expect(html).toContain("<aside>");
+    expect(html).toContain("intercept loading");
+  });
+
+  it("renders a sibling intercepting page before source layouts that consume its request state", async () => {
+    // The intercepting page initializes request state, as with next-intl's
+    // setRequestLocale(), before the source layout reads it, through an async
+    // pass-through intercepting layout.
+    let requestLocale = "en";
+    async function LocalePage({ params }: { params: Promise<{ locale: string }> }) {
+      const { locale } = await params;
+      requestLocale = locale;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      return React.createElement("main", null, `page:${requestLocale}`);
+    }
+    function LocaleLayout(props: Record<string, unknown>) {
+      return React.createElement(
+        "section",
+        null,
+        `layout:${requestLocale}`,
+        props.children as React.ReactNode,
+      );
+    }
+    async function InterceptLayout(props: Record<string, unknown>) {
+      await props.params;
+      return props.children as React.ReactNode;
+    }
+    const result = await buildPageElements(
+      createBaseOptions({
+        route: createSyntheticRoute({
+          layouts: [createSyntheticPageModule(LocaleLayout)],
+          layoutTreePositions: [1],
+          page: createSyntheticPageModule(() => null),
+          routeSegments: ["[locale]"],
+          pattern: "/:locale",
+        }),
+        params: { locale: "de" },
+        routePath: "/de/photo",
+        opts: {
+          interceptBranchSegments: ["(.)photo"],
+          interceptLayouts: [createSyntheticPageModule(InterceptLayout)],
+          interceptLayoutSegments: [["(.)photo"]],
+          interceptPage: createSyntheticPageModule(LocalePage),
+          interceptParams: { locale: "de" },
+          interceptSlotKey: SIBLING_PAGE_INTERCEPT_SLOT_KEY,
+          interceptSourcePageSegments: ["[locale]", "(.)photo"],
+        },
+      }),
+    );
+    const html = await renderRouteEntry(result, result[APP_ROUTE_KEY] as string);
+
+    expect(html).toContain("layout:de");
+    expect(html).toContain("page:de");
+    expect(html).not.toContain("layout:en");
   });
 
   it("keys sibling interception pages by target graph and bound params", async () => {
