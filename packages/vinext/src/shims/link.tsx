@@ -541,7 +541,10 @@ function prefetchUrl(
           if (mountedSlotsHeader) {
             shellHeaders.set(VINEXT_MOUNTED_SLOTS_HEADER, mountedSlotsHeader);
           }
+          const ownerLeaveCount = owner?.leaveCount;
           const shellRscUrl = await createRscRequestUrl(fullHref, shellHeaders);
+          // The Link left meanwhile, so this prefetch was dropped.
+          if (owner && owner.leaveCount !== ownerLeaveCount) return;
           const shellCacheKey = AppElementsWire.encodeCacheKey(shellRscUrl, interceptionContext);
           const shellCache = getPrefetchCache();
           let shellEntry = shellCache.get(shellCacheKey);
@@ -816,6 +819,8 @@ type LinkPrefetchInstance = {
   mode: LinkPrefetchMode;
   /** Prefetches this Link created or reused while visible. */
   ownedPrefetches: Set<OwnedLinkPrefetch>;
+  /** How many times this Link has left the viewport or unmounted. */
+  leaveCount: number;
   pagesRouteHref?: string;
   queuedViewportPrefetch: boolean;
   routerMode: LinkPrefetchRouterMode;
@@ -938,6 +943,7 @@ function joinOwnedLinkPrefetch(
 
 /** Called when a Link leaves the viewport or unmounts. */
 function releaseOwnedLinkPrefetches(instance: LinkPrefetchInstance): void {
+  instance.leaveCount += 1;
   for (const owned of instance.ownedPrefetches) {
     owned.owners.delete(instance);
     if (owned.droppedAt !== undefined || hasVisibleOwner(owned)) continue;
@@ -1328,6 +1334,7 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
       locale,
       mode: prefetchMode,
       ownedPrefetches: new Set(),
+      leaveCount: 0,
       pagesRouteHref:
         normalizedRouteHref === normalizedHref
           ? undefined
