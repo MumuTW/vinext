@@ -142,6 +142,7 @@ export function getFontMimeType(pathOrUrl: string): string {
   if (pathOrUrl.endsWith(".woff2")) return "font/woff2";
   if (pathOrUrl.endsWith(".woff")) return "font/woff";
   if (pathOrUrl.endsWith(".ttf")) return "font/ttf";
-  if (pathOrUrl.endsWith(".otf")) return "font/opentype";
+  if (pathOrUrl.endsWith(".otf")) return "font/otf";
+  if (pathOrUrl.endsWith(".eot")) return "application/vnd.ms-fontobject";
   return "font/woff2";
 }

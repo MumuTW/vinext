@@ -12,6 +12,7 @@ import { toSlash } from "pathslash";
 import os from "node:os";
 import zlib from "node:zlib";
 import { StaticFileCache } from "../packages/vinext/src/server/static-file-cache.js";
+import { getFontMimeType } from "../packages/vinext/src/shims/font-utils.js";
 
 /** Create a temp directory that mimics dist/client/ structure. */
 async function setupClientDir(): Promise<string> {
@@ -57,6 +58,25 @@ describe("StaticFileCache", () => {
     const cache = await StaticFileCache.create(clientDir);
 
     expect(cache.lookup("/_next/static/nope.js")).toBeUndefined();
+  });
+
+  it("serves font formats with the same MIME type declared by their preload", async () => {
+    const formats = [
+      ["woff2", "font/woff2"],
+      ["woff", "font/woff"],
+      ["ttf", "font/ttf"],
+      ["otf", "font/otf"],
+      ["eot", "application/vnd.ms-fontobject"],
+    ];
+    for (const [extension] of formats) {
+      await writeFile(clientDir, `_next/static/_vinext_fonts/font.${extension}`, "font bytes");
+    }
+    const cache = await StaticFileCache.create(clientDir);
+    for (const [extension, mimeType] of formats) {
+      const href = `/_next/static/_vinext_fonts/font.${extension}`;
+      expect.soft(cache.lookup(href)?.original.headers["Content-Type"]).toBe(mimeType);
+      expect.soft(getFontMimeType(href)).toBe(mimeType);
+    }
   });
 
   it("handles non-existent client directory gracefully", async () => {

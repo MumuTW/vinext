@@ -16,7 +16,7 @@ import type { Plugin } from "vite-plus";
 // ── Helpers ───────────────────────────────────────────────────
 
 /** Name of the cached stylesheet in each `.vinext/fonts/<family-hash>/` dir. */
-const CACHED_STYLESHEET = "style-q7f3kd.css";
+const CACHED_STYLESHEET = "style-formats-v2.css";
 
 /** Unwrap a Vite plugin hook that may use the object-with-filter format */
 function unwrapHook(hook: any): Function {
@@ -1405,6 +1405,53 @@ describe("fetchAndCacheFont", () => {
     expect(result.code).toContain(".woff2");
   }, 15000);
 
+  describe("font formats", () => {
+    // Ported from Next.js: packages/font/src/google/find-font-files-in-css.test.ts
+    // https://github.com/vercel/next.js/blob/98a73ead5bf711183e07398983c5c943f86328e7/packages/font/src/google/find-font-files-in-css.test.ts
+    it.each([
+      ["https://fonts.gstatic.com/l/font?kit=a=b&skey=c&v=v20", "format('woff2')", "woff2"],
+      ["https://fonts.gstatic.com/l/font?kit=a%2Bb&skey=c", 'format("woff")', "woff"],
+      ["https://fonts.gstatic.com/l/font", "format('truetype')", "ttf"],
+      ["https://fonts.gstatic.com/l/font", "format('opentype')", "otf"],
+      ["https://fonts.gstatic.com/l/font", "format('embedded-opentype')", "eot"],
+      ["https://fonts.gstatic.com/l/font", "", "woff2"],
+      ["https://fonts.gstatic.com/l/font", "format('unknown')", "woff2"],
+      ["https://fonts.gstatic.com/s/font.ttf?kit=a&v=1#font", "format('woff2')", "ttf"],
+      ["https://fonts.gstatic.com/l/font?kit=a.woff", "format('woff2')", "woff2"],
+      ["https://fonts.gstatic.com/s/font.woff2", "format('woff2')", "woff2"],
+    ])("self-hosts %s %s as .%s", async (url, format, ext) => {
+      const plugin = getGoogleFontsPlugin();
+      initPlugin(plugin, { command: "build", root });
+      mockGoogleFontsCSS(
+        `/* latin */\n@font-face {\n  font-family: 'Inter';\n  src: url(${url}) ${format};\n}`,
+      );
+      const fontBytes = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 1, 2, 3, 4]);
+      const downloads = mockGoogleFontFiles(fontBytes);
+
+      const result = await unwrapHook(plugin.transform).call(
+        plugin,
+        "import { Inter } from 'next/font/google';\nconst inter = Inter({ weight: '400', subsets: ['latin'] });",
+        "/app/layout.tsx",
+      );
+
+      // Exercise the real downloader, cached file, and emitted CSS rather
+      // than only testing extension selection in isolation.
+      expect(downloads.urls).toEqual([url]);
+      const cacheDir = path.join(root, ".vinext", "fonts");
+      const fontDirName = fs.readdirSync(cacheDir).find((dir) => dir.startsWith("inter-"));
+      expect(fontDirName).toBeDefined();
+      const fontDir = path.join(cacheDir, fontDirName!);
+      const fontFiles = fs.readdirSync(fontDir).filter((file) => !file.endsWith(".css"));
+      expect(fontFiles).toHaveLength(1);
+      expect(fs.readFileSync(path.join(fontDir, fontFiles[0]))).toEqual(Buffer.from(fontBytes));
+      expect(path.extname(fontFiles[0])).toBe(`.${ext}`);
+      expect(result.code).toContain(
+        `url(/_next/static/_vinext_fonts/${fontDirName}/${fontFiles[0]})`,
+      );
+      expect(result.code).not.toContain("fonts.gstatic.com");
+    });
+  });
+
   describe("cache stylesheet", () => {
     const fontCSS = [
       "/* cyrillic */",
@@ -1516,6 +1563,41 @@ describe("fetchAndCacheFont", () => {
       expect(result.code).toContain(`url(/_next/static/_vinext_fonts/${fontDirName}/inter-`);
       expect(result.code).not.toContain(toSlash(root));
       expect(fs.readFileSync(current, "utf-8")).toContain("__VINEXT_FONT_CACHE_DIR__");
+    });
+
+    it("refetches a pre-format-cache stylesheet that mislabeled an extensionless WOFF2 font", async () => {
+      const fontUrl = "https://fonts.gstatic.com/l/font?kit=a%2Bb%25c=d&skey=test&v=v20";
+      const fonts = mockGoogleFontsCSS(
+        `/* latin */\n@font-face {\n  font-family: 'Inter';\n  src: url(${fontUrl}) format('woff2');\n}`,
+      );
+      const fontBytes = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 1, 2, 3, 4]);
+      const downloads = mockGoogleFontFiles(fontBytes);
+      await transformWithFreshPlugin();
+
+      const fontDirName = fs.readdirSync(cacheDir).find((dir) => dir.startsWith("inter-"));
+      expect(fontDirName).toBeDefined();
+      const fontDir = path.join(cacheDir, fontDirName!);
+      for (const file of fs.readdirSync(fontDir)) {
+        fs.rmSync(path.join(fontDir, file));
+      }
+      // Seed exactly the cache left by versions that inferred .ttf from
+      // the extensionless URL, then start a new plugin as on an upgrade.
+      fs.writeFileSync(path.join(fontDir, "inter-old.ttf"), fontBytes);
+      fs.writeFileSync(
+        path.join(fontDir, "style-q7f3kd.css"),
+        `/* latin */\n@font-face {\n  src: url(__VINEXT_FONT_CACHE_DIR__/${fontDirName}/inter-old.ttf) format('woff2');\n}`,
+      );
+
+      const result = await transformWithFreshPlugin();
+
+      expect(fonts.count()).toBe(2);
+      expect(downloads.urls).toEqual([fontUrl, fontUrl]);
+      expect(result.code).not.toContain("inter-old.ttf");
+      const current = fs.readFileSync(path.join(fontDir, CACHED_STYLESHEET), "utf-8");
+      const fontFile = /url\(__VINEXT_FONT_CACHE_DIR__\/[^/]+\/([^)]+)\)/.exec(current)?.[1];
+      expect(fontFile).toBeDefined();
+      expect(path.extname(fontFile!)).toBe(".woff2");
+      expect(fs.readFileSync(path.join(fontDir, fontFile!))).toEqual(Buffer.from(fontBytes));
     });
 
     const failedDownloads = [
