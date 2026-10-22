@@ -856,9 +856,7 @@ function createOwnedLinkPrefetch(
   owner: LinkPrefetchInstance | undefined,
 ): OwnedLinkPrefetch | undefined {
   if (owner === undefined) return undefined;
-  const owned: OwnedLinkPrefetch = { owners: new Set([owner]), requests: [], dropped: false };
-  owner.ownedPrefetches.add(owned);
-  return owned;
+  return { owners: new Set([owner]), requests: [], dropped: false };
 }
 
 function isOwnedLinkPrefetchWanted(owned: OwnedLinkPrefetch): boolean {
@@ -884,12 +882,17 @@ function scheduleOwnedLinkPrefetch(
   return request;
 }
 
-/** Registers the promise cached for `owned`, which reusing Links join. */
+/**
+ * Registers the promise cached for `owned`, which reusing Links join. Owners
+ * are registered here, not in `createOwnedLinkPrefetch`, since a cache hit
+ * returns before sending anything.
+ */
 function trackOwnedLinkPrefetch(
   owned: OwnedLinkPrefetch | undefined,
   fetchPromise: Promise<Response>,
 ): void {
   if (owned === undefined) return;
+  for (const owner of owned.owners) owner.ownedPrefetches.add(owned);
   owned.claimable = fetchPromise;
   ownedLinkPrefetches.set(fetchPromise, owned);
   const settle = (failed: boolean) => {
