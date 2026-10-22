@@ -89,10 +89,11 @@ describe.each(["app", "pages"] as const)(
       await fs.writeFile(
         adapterPath,
         `export default function createOptimizer() {
+        const encode = globalThis.require("./image-encoder.cjs");
         return {
           async transformImage(body, { width, format, quality }) {
             const source = Buffer.from(await new Response(body).arrayBuffer());
-            return new Response("transformed:" + source.toString("base64"), {
+            return new Response(encode(source), {
               headers: {
                 "Content-Type": format,
                 "X-Optimizer-Width": String(width),
@@ -119,6 +120,12 @@ describe.each(["app", "pages"] as const)(
         ],
       });
       await builder.buildApp();
+      // Adapter initialization must resolve CommonJS dependencies relative to
+      // the built server entry, just like its request handlers do.
+      await fs.writeFile(
+        path.join(outDir, "server/image-encoder.cjs"),
+        'module.exports = (source) => "transformed:" + source.toString("base64");\n',
+      );
       ({ server } = await startProdServer({ port: 0, host: "127.0.0.1", outDir }));
       baseUrl = serverOrigin(server);
     }, 120000);

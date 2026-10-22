@@ -1896,8 +1896,10 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   // instance, and only cache-busts when this function runs again after a
   // rebuild to the same path (e.g. across test describe blocks).
   const rscModule = await importServerEntryModule(rscEntryPath);
-  rscModule.__registerConfiguredImageOptimizer?.();
   const rscEntryRequire = createServerEntryRequire(rscEntryPath);
+  runWithServerEntryRequire(rscEntryRequire, () =>
+    rscModule.__registerConfiguredImageOptimizer?.(),
+  );
   const rscHandler = resolveAppRouterHandler(rscModule.default);
   const workerEntry =
     rscModule.default && typeof rscModule.default === "object"
@@ -2479,10 +2481,12 @@ async function createPagesRouterRequestHandler(
   // module instance, and only cache-busts when this function runs again after
   // a rebuild to the same output path.
   const serverEntry = await importServerEntryModule(serverEntryPath);
+  const serverEntryRequire = createServerEntryRequire(serverEntryPath);
   // The built-in image endpoint does not render a page before it needs the
   // adapter. Keep initialization on the Node host so Workers can supply env.
-  serverEntry.__registerConfiguredImageOptimizer?.();
-  const serverEntryRequire = createServerEntryRequire(serverEntryPath);
+  runWithServerEntryRequire(serverEntryRequire, () =>
+    serverEntry.__registerConfiguredImageOptimizer?.(),
+  );
   const {
     renderPage,
     handleApiRoute: handleApi,
