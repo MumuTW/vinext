@@ -896,6 +896,8 @@ function trackOwnedLinkPrefetch(
   owned.claimable = fetchPromise;
   ownedLinkPrefetches.set(fetchPromise, owned);
   const settle = (failed: boolean) => {
+    // Only work that can still be cancelled is joined.
+    ownedLinkPrefetches.delete(fetchPromise);
     for (const owner of owned.owners) {
       owner.ownedPrefetches.delete(owned);
       // A Link that came back while the dropped prefetch was still settling
