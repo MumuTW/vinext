@@ -1546,8 +1546,10 @@ export function buildAppPageElements<
       if (slotOverride?.props) {
         Object.assign(slotProps, slotOverride.props);
       }
-      // The slot's notFound(), forbidden() and unauthorized() are caught above
-      // its layout, so the server's fallback needs to know which one.
+      // On the server, the slot's notFound(), forbidden() and unauthorized()
+      // are caught above the layout that renders it (a root layout re-renders
+      // around its own boundary instead, for not-found or when it is a client
+      // component), so the fallback needs to know which layout.
       slotElement = options.createPageElement
         ? options.createPageElement(
             slotComponent!,
