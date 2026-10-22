@@ -594,7 +594,12 @@ function prefetchUrl(
           if (mountedSlotsHeader) {
             probeHeaders.set(VINEXT_MOUNTED_SLOTS_HEADER, mountedSlotsHeader);
           }
+          const ownerLeaveCount = owner?.leaveCount;
           const probeRscUrl = await createRscRequestUrl(fullHref, probeHeaders);
+          // The Link left meanwhile. The probe is best effort, so drop it.
+          if (owner && owner.leaveCount !== ownerLeaveCount) {
+            throw new DOMException("Prefetch is no longer wanted", "AbortError");
+          }
           return fetch(probeRscUrl, {
             method: "HEAD",
             headers: probeHeaders,
