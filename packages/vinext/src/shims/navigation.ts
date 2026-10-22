@@ -1810,8 +1810,12 @@ export async function consumePrefetchResponseForNavigation(
     // request is still queued behind the low-priority concurrency cap, waiting
     // would block the navigation on unrelated prefetch response bodies, so
     // start it now instead. No-op once the request is already in flight.
-    promoteAppPrefetchFetch(entry.fetchPromise);
-    await entry.pending.catch(() => {});
+    const releaseClaim = promoteAppPrefetchFetch(entry.fetchPromise, options?.shouldConsume);
+    try {
+      await entry.pending.catch(() => {});
+    } finally {
+      releaseClaim();
+    }
     if (cache.get(cacheKey) !== entry) return null;
     // Re-checked for a navigation superseded while the request was in flight.
     if (options?.shouldConsume?.() === false) return null;
