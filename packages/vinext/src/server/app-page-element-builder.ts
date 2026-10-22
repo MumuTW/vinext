@@ -72,6 +72,57 @@ import {
 } from "./app-render-dependency.js";
 import { isPromiseLike } from "../utils/promise.js";
 
+type SiblingInterceptPageOutcome =
+  | { error: unknown }
+  | { result: React.ReactNode | Promise<React.ReactNode> };
+
+function readSiblingInterceptPageOutcome(
+  outcome: SiblingInterceptPageOutcome,
+): React.ReactNode | Promise<React.ReactNode> {
+  if ("error" in outcome) throw outcome.error;
+  return outcome.result;
+}
+
+/**
+ * A sibling intercepting page that renders beside its intercepting layouts,
+ * as Next.js renders each segment. The source route's layouts wait for the
+ * page, so `Starter` invokes it ahead of the layouts, even when one of them
+ * never renders its children, and `Outlet` renders its result where the
+ * innermost layout renders its children.
+ */
+function createSiblingInterceptPageSlot(
+  invokePage: () => React.ReactNode | Promise<React.ReactNode>,
+): { Outlet: AppPageComponent; Starter: AppPageComponent } {
+  let outcome: SiblingInterceptPageOutcome | null = null;
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  function Starter(): null {
+    try {
+      const result = invokePage();
+      // A layout that leaves out its children never renders the result.
+      if (isPromiseLike(result)) Promise.resolve(result).catch(() => {});
+      outcome = { result };
+    } catch (error) {
+      // React retries a suspension, which invokes the page again.
+      if (isAppRenderSuspension(error)) throw error;
+      outcome = { error };
+    }
+    settle();
+    return null;
+  }
+  function Outlet(): React.ReactNode | Promise<React.ReactNode> {
+    return outcome
+      ? readSiblingInterceptPageOutcome(outcome)
+      : settled.then(() => readSiblingInterceptPageOutcome(outcome!));
+  }
+  return {
+    Outlet: Outlet as unknown as AppPageComponent,
+    Starter: Starter as unknown as AppPageComponent,
+  };
+}
+
 function resolveInterceptLayoutParams(
   branchSegments: readonly string[],
   layoutSegments: readonly string[],
@@ -619,6 +670,22 @@ export async function buildPageElements<
       return createElement(PageComponent, withUseCachePageMarker(PageComponent, invocationProps));
     }
 
+    return createElement(
+      createPageInvoker(
+        PageComponent,
+        props,
+        renderDependency,
+        slotLayoutIndex,
+      ) as unknown as AppPageComponent,
+    );
+  };
+  // A server page's invocation, which releases its render dependency.
+  const createPageInvoker = (
+    PageComponent: AppPageComponent,
+    props: Readonly<Record<string, unknown>>,
+    renderDependency?: AppPageRenderDependency | null,
+    slotLayoutIndex?: number,
+  ) => {
     const PageInvoker = () => {
       const invocationProps: Record<string, unknown> = { ...props };
       if (searchParams) {
@@ -685,7 +752,7 @@ export async function buildPageElements<
         throw slotLayoutIndex === undefined ? error : tagAppPageSlotError(error, slotLayoutIndex);
       }
     };
-    return createElement(PageInvoker as unknown as AppPageComponent);
+    return PageInvoker;
   };
   const pageSearchParamsThenable = searchParams ? makeThenableParams(pageSearchParams) : undefined;
 
@@ -705,10 +772,18 @@ export async function buildPageElements<
     metadataOutlet: React.ReactNode,
   ): ReturnType<typeof createElement> | null => {
     if (!isSiblingIntercept || !EffectivePageComponent) return null;
+    const pageSlot =
+      pageRenderDependency && opts?.interceptLayouts?.some((layoutModule) => layoutModule?.default)
+        ? createSiblingInterceptPageSlot(
+            createPageInvoker(EffectivePageComponent, pageProps, pageRenderDependency),
+          )
+        : null;
     let element: ReturnType<typeof createElement> = createElement(
       Fragment,
       null,
-      createPageElement(EffectivePageComponent, pageProps, pageRenderDependency),
+      pageSlot
+        ? createElement(pageSlot.Outlet)
+        : createPageElement(EffectivePageComponent, pageProps, pageRenderDependency),
       metadataOutlet,
     );
 
@@ -793,7 +868,9 @@ export async function buildPageElements<
         );
       }
     }
-    return element;
+    return pageSlot
+      ? createElement(Fragment, null, createElement(pageSlot.Starter), element)
+      : element;
   };
 
   return traceCreateComponentTree(() => {
