@@ -184,4 +184,42 @@ describe("OG asset import resolution", () => {
     expect(productionFont.status).toBe(200);
     expect(await productionFont.text()).toBe(FONT.toString("base64"));
   }, 120000);
+
+  it("keeps the require export for require() calls to a tracked dependency", async () => {
+    const workspace = createWorkspace();
+    workspaceRoot = workspace.workspaceRoot;
+    const { root } = workspace;
+    const packageRoot = path.join(root, "node_modules", "conditional-dep");
+    fs.mkdirSync(packageRoot);
+    fs.writeFileSync(
+      path.join(packageRoot, "package.json"),
+      JSON.stringify({
+        name: "conditional-dep",
+        exports: { ".": { import: "./index.mjs", require: "./index.cjs" } },
+      }),
+    );
+    fs.writeFileSync(path.join(packageRoot, "index.mjs"), "export const kind = 'import';");
+    fs.writeFileSync(path.join(packageRoot, "index.cjs"), "exports.kind = 'require';");
+    const manifestPath = path.join(root, "package.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest.dependencies["conditional-dep"] = "*";
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    server = await createServer({
+      root,
+      configFile: false,
+      plugins: vinext({ appDir: root }),
+      server: { middlewareMode: true, watch: null },
+      logLevel: "silent",
+    });
+    const container = server.environments.ssr.pluginContainer;
+    const importer = toSlash(path.join(root, "app", "page.tsx"));
+
+    const required = await container.resolveId("conditional-dep", importer, {
+      kind: "require-call",
+    });
+    expect(required?.id.split("?", 1)[0]).toMatch(/\/conditional-dep\/index\.cjs$/);
+    const imported = await container.resolveId("conditional-dep", importer);
+    expect(imported?.id.split("?", 1)[0]).toMatch(/\/conditional-dep\/index\.mjs$/);
+  }, 60000);
 });
